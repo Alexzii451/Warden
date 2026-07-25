@@ -221,7 +221,6 @@
 .chat-file-link:hover {
   background: var(--surface);
 }
-}
 
 /* Speaker icon on bot messages */
 .msg-speak-btn {
@@ -806,7 +805,6 @@
   background: var(--backdrop);
   backdrop-filter: blur(4px);
 }
-}
 
 /* ========================================
    Empty State
@@ -1157,7 +1155,6 @@
 .home-session-status.active { background: #10b981; }
 .home-session-status.idle { background: #f59e0b; }
 .home-session-status.offline { background: var(--text-tertiary); opacity: 0.4; }
-}
 .home-session-info {
   flex: 1;
   min-width: 0;
@@ -1338,7 +1335,6 @@
   opacity: 1;
   animation: talk-ring 1.2s ease-in-out infinite;
 }
-}
 
 .talk-state-label {
   font-size: 0.95rem;
@@ -1371,7 +1367,6 @@
   height: 100%;
   color: var(--text-tertiary);
   font-size: 0.85rem;
-}
 }
 
 .talk-msg-bubble {
@@ -1744,7 +1739,6 @@
 .active-timer-info {flex:1;min-width:0}
 .active-timer-desc {font-size:.85rem;font-weight:500;display:block}
 .active-timer-elapsed {font-size:.78rem;font-weight:700;color:var(--accent);font-variant-numeric:tabular-nums}
-}
 
 .timesheet-header-row {display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
 .usage-keys-section {
