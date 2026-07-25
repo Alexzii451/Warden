@@ -97,9 +97,13 @@ export class TelegramChannel implements Channel {
   private startTyping(chatId: string): void {
     this.stopTyping();
     this.typingSince = Date.now();
+    log(`startTyping fired for chat ${chatId}`);
     const send = () => {
       if (Date.now() - this.typingSince > TYPING_MAX_MS) { this.stopTyping(); return; }
-      this.bot.api.sendChatAction(Number(chatId), 'typing').catch(() => {});
+      this.bot.api.sendChatAction(Number(chatId), 'typing').then(
+        () => {},
+        (err: any) => log(`sendChatAction FAILED: ${String(err?.message ?? err)}`),
+      );
     };
     send();
     this.typingTimer = setInterval(send, TYPING_INTERVAL_MS);

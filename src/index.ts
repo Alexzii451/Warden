@@ -31,6 +31,7 @@ import {
   updateTask,
   deleteTask,
   getEmailAccounts,
+  getOAuthAccount,
   getChatHistory,
   getMessagesForDashboard,
   getMessagesSince,
@@ -447,16 +448,33 @@ export function buildAgentCallbacks(): CallbackMap {
       try {
         const folder = typeof args?.folder === 'string' ? args.folder : 'INBOX';
         const limit = typeof args?.limit === 'number' ? args.limit : 20;
-        // The agent doesn't supply an accountId; pick the first enabled account.
-        const accounts = getEmailAccounts(null);
-        const account = accounts.find((a) => a.enabled);
-        if (!account) {
-          // TODO: wire to actual email function once an account is configured.
+        // Iris sends `search`; older callers sent `since`. Accept both so the
+        // search filter is no longer silently dropped.
+        const search = typeof args?.search === 'string' ? args.search
+                     : typeof args?.since === 'string' ? args.since : undefined;
+        // The agent doesn't supply an accountId. Try each enabled account until
+        // one connects, so a broken OAuth-linked account (dangling
+        // oauth_account_id — the oauth_accounts row was deleted but the
+        // email_accounts row still references it) no longer masks a working
+        // IMAP/password account that sorts after it.
+        const accounts = getEmailAccounts(null).filter((a) => a.enabled);
+        if (accounts.length === 0) {
           return { ok: false, error: 'no enabled email account' };
         }
-        const search = typeof args?.since === 'string' ? args.since : undefined;
-        const emails = await fetchEmails(account.id, folder, limit, search);
-        return { ok: true, emails };
+        const errors: string[] = [];
+        for (const account of accounts) {
+          if (account.oauth_account_id && !getOAuthAccount(account.oauth_account_id)) {
+            errors.push(`${account.email}: linked OAuth account was deleted, skipping`);
+            continue;
+          }
+          try {
+            const emails = await fetchEmails(account.id, folder, limit, search);
+            return { ok: true, emails };
+          } catch (err: any) {
+            errors.push(`${account.email}: ${String(err?.message ?? err)}`);
+          }
+        }
+        return { ok: false, error: `all email accounts failed — ${errors.join('; ')}` };
       } catch (err: any) {
         return { ok: false, error: String(err?.message ?? err) };
       }
@@ -1163,7 +1181,7 @@ export function buildAgentCallbacks(): CallbackMap {
       const localNow = new Date().toLocaleString('sv-SE', { timeZone: tz }).replace(' ', 'T');
       const task = `Current local time is ${localNow} (timezone ${tz}).\n\nA message was passed to you from the orchestrator/user: "${message}". Record it in security_log (action: record, assessment=normal, condition=<the passed note>) so future reviews can use it as context, then STOP. Do not send_message.`;
       const heimdallModel =
-        (getRouterState('orchestrator:model') || getRouterState('global:default_model') || '').replace(/^local:/, '')
+        (getRouterState('orchestrator:model') || '').replace(/^local:/, '')
         || undefined;
       try {
         runSubAgentBackground({
@@ -1230,7 +1248,7 @@ async function updateMercurySummary(): Promise<void> {
       `Do NOT include the most recent ${MERCURY_RECENT_MESSAGES} turns; they are kept verbatim. ` +
       `Write in short bullet/paragraph form so the main agent can scan it quickly.\n\n${olderLines}\n\nMercury summary:`;
 
-    const model = (getRouterState('mercury:model') || getRouterState('orchestrator:model') || getRouterState('global:default_model') || '').replace(/^local:/, '') || undefined;
+    const model = (getRouterState('mercury:model') || getRouterState('orchestrator:model') || '').replace(/^local:/, '') || undefined;
     const mercuryInput: AgentInput = {
       prompt: summaryPrompt,
       sessionId: 'mercury',
@@ -1351,11 +1369,11 @@ async function processOwnerMessages(): Promise<void> {
     } catch { /* best-effort */ }
 
     // Heimdall shares the orchestrator's model (the one the dashboard sets via
-    // orchestrator:model / global:default_model) — the same model that makes
+    // orchestrator:model) — the same model that makes
     // webcam_capture vision work for the orchestrator. A non-vision model
     // (e.g. deepseek-v4-pro:cloud) rejects the image and Heimdall crashes.
     const heimdallModel =
-      (getRouterState('orchestrator:model') || getRouterState('global:default_model') || '').replace(/^local:/, '')
+      (getRouterState('orchestrator:model') || '').replace(/^local:/, '')
       || undefined;
 
     try {
@@ -1426,7 +1444,7 @@ async function processOwnerMessages(): Promise<void> {
     history: pending,
     timeoutMs: 10 * 60 * 1000, // orchestrator turns must be short: Atlas is always async; a stuck model/tool call recovers in 10 min
     memoryContext,
-    orchestratorModel: (getRouterState('orchestrator:model') || getRouterState('global:default_model') || '').replace(/^local:/, '') || undefined,
+    orchestratorModel: (getRouterState('orchestrator:model') || '').replace(/^local:/, '') || undefined,
     model: (getRouterState('atlas:model') || '').replace(/^local:/, '') || undefined,
     councilSkepticModel: (getRouterState('council:skeptic_model') || '').replace(/^local:/, '') || undefined,
     councilPragmatistModel: (getRouterState('council:pragmatist_model') || '').replace(/^local:/, '') || undefined,

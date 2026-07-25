@@ -363,6 +363,25 @@ export function initDatabase(): void {
 
   // Migrate from JSON files if they exist
   migrateJsonState();
+
+  // Consolidate the legacy `global:default_model` router-state key into the
+  // canonical `orchestrator:model` key. The dashboard used to write the
+  // orchestrator model to `global:default_model`; it now writes
+  // `orchestrator:model`. The read sites used `orchestrator:model ||
+  // global:default_model`, which meant a stale `orchestrator:model` value
+  // would silently shadow the user's intended model sitting unread in
+  // `global:default_model` — the "I changed the model but it's still running
+  // the old one" bug. This migration copies the legacy value across only when
+  // `orchestrator:model` is empty (so no setting is lost), then deletes the
+  // legacy key so there is a single source of truth.
+  const legacyDefault = getRouterState('global:default_model');
+  if (legacyDefault !== undefined) {
+    const current = getRouterState('orchestrator:model');
+    if (!current) {
+      setRouterState('orchestrator:model', legacyDefault);
+    }
+    db.prepare('DELETE FROM router_state WHERE key = ?').run('global:default_model');
+  }
 }
 
 /** @internal - for tests only. Creates a fresh in-memory database. */
@@ -1954,7 +1973,15 @@ export function updateOAuthAccount(
 }
 
 export function deleteOAuthAccount(id: string): boolean {
-  return db.prepare('DELETE FROM oauth_accounts WHERE id = ?').run(id).changes > 0;
+  // Cascade the disconnect into mail: email_accounts.oauth_account_id is a
+  // plain TEXT column (no FK), so the linked Gmail/Outlook row is NOT removed
+  // by deleting the oauth_accounts row — it must be deleted explicitly, or the
+  // disconnected account lingers in the mail tab forever. email_drafts (and any
+  // other FK-on-delete-cascade children of email_accounts) clean up with it.
+  return db.transaction(() => {
+    db.prepare('DELETE FROM email_accounts WHERE oauth_account_id = ?').run(id);
+    return db.prepare('DELETE FROM oauth_accounts WHERE id = ?').run(id).changes > 0;
+  })();
 }
 
 export function getEmailAccountByOAuthId(oauthAccountId: string): EmailAccount | undefined {

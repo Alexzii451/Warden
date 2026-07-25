@@ -104,13 +104,13 @@ export async function pullCalendarEvents(
   const provider = getProviderInstance(account.provider as OAuthProviderType);
   const source = calendarSourceForProvider(account.provider);
 
-  // Sync window: 7 days back, 30 days forward
+  // Sync window: 90 days back, 90 days forward
   const now = new Date();
   const startDate = new Date(
-    now.getTime() - 7 * 24 * 60 * 60 * 1000,
+    now.getTime() - 90 * 24 * 60 * 60 * 1000,
   ).toISOString();
   const endDate = new Date(
-    now.getTime() + 30 * 24 * 60 * 60 * 1000,
+    now.getTime() + 90 * 24 * 60 * 60 * 1000,
   ).toISOString();
 
   // Fetch all provider calendars and iterate each one
@@ -154,6 +154,7 @@ export async function pullCalendarEvents(
     let remoteEvents;
     try {
       remoteEvents = await provider.fetchEvents(token, startDate, endDate, cal.id || undefined);
+      logger.info({ accountId, calendarId: cal.id, calendarName: cal.name, eventCount: remoteEvents.length }, 'Fetched events for calendar');
     } catch (err) {
       logger.warn({ err, accountId, calendarId: cal.id, calendarName: cal.name }, 'Failed to fetch events for calendar, skipping');
       continue;
