@@ -615,9 +615,31 @@ export function runAgent(input: AgentRunInput): Promise<AgentOutput> {
       resetTurnState(callbacks, resolve, input.timeoutMs);
       try {
         mkdirSync(IPC_INPUT_DIR, { recursive: true });
+        // Re-sync ALL dashboard model/ctx settings to the persistent child every turn.
+        // The child captured env at spawn and only got models on its first stdin payload;
+        // without this, dashboard changes never reach the running orchestrator (the
+        // "settings didn't apply" bug). Models come from AgentInput (the host already
+        // resolved orchestrator:model); ctx overrides live in process.env, which the
+        // host refreshes per turn before calling runAgent.
         writeFileSync(
           `${IPC_INPUT_DIR}/msg-${Date.now()}.json`,
-          JSON.stringify({ type: 'message', text: input.prompt, showThinking: input.showThinking, verbose: input.verbose }),
+          JSON.stringify({
+            type: 'message',
+            text: input.prompt,
+            showThinking: input.showThinking,
+            verbose: input.verbose,
+            orchestratorModel: input.orchestratorModel,
+            model: input.model,
+            councilSkepticModel: input.councilSkepticModel,
+            councilPragmatistModel: input.councilPragmatistModel,
+            councilSynthesistModel: input.councilSynthesistModel,
+            subagentModel: process.env.SUBAGENT_MODEL || '',
+            orchestratorCtx: process.env.ORCHESTRATOR_NUM_CTX || '',
+            subagentCtx: process.env.SUBAGENT_NUM_CTX || '',
+            atlasCtx: process.env.ATLAS_NUM_CTX || '',
+            toolsCtx: process.env.TOOLS_NUM_CTX || '',
+            mercuryCtx: process.env.MERCURY_NUM_CTX || '',
+          }),
         );
         logger.info({ promptLen: input.prompt.length }, 'agent-spawn: routed via IPC (persistent agent)');
       } catch (err) {

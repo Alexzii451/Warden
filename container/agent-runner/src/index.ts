@@ -410,6 +410,11 @@ function drainIpcInput() {
                 fs.unlinkSync(filePath);
                 if (data.type === 'message' && data.text) {
                     messages.push(data.text);
+                    // Re-sync dashboard model/ctx settings from the host for this turn.
+                    // The persistent child captured env at spawn and only got models on
+                    // its first stdin payload; without this, dashboard changes never
+                    // reach the running orchestrator (the "settings didn't apply" bug).
+                    applySettingsSync(data);
                 } else if (data.type === 'interrupt') {
                     interruptRequested = true;
                     log('Interrupt signal received via IPC');
@@ -430,6 +435,36 @@ function drainIpcInput() {
         return [];
     }
 }
+
+/**
+ * Apply dashboard model/ctx settings re-synced from the host on an IPC message.
+ * The persistent child only received models on its first stdin payload; this
+ * updates them (and the num_ctx env vars) every turn so dashboard changes take
+ * effect immediately instead of waiting for a respawn. No hardcoded fallbacks —
+ * every value comes from settings (resolved by the host from router_state).
+ */
+function applySettingsSync(data: any) {
+    if (!data || typeof data !== 'object') return;
+    if (data.orchestratorModel !== undefined) {
+        const m = (data.orchestratorModel || '').replace(/^local:/, '');
+        if (m) ORCHESTRATOR_MODEL = m;
+    }
+    if (data.model !== undefined) {
+        ATLAS_MODEL = (data.model || '').replace(/^local:/, '') || ORCHESTRATOR_MODEL;
+    }
+    if (data.councilSkepticModel !== undefined) COUNCIL_MODEL_SKEPTIC = (data.councilSkepticModel || '').replace(/^local:/, '');
+    if (data.councilPragmatistModel !== undefined) COUNCIL_MODEL_PRAGMATIST = (data.councilPragmatistModel || '').replace(/^local:/, '');
+    if (data.councilSynthesistModel !== undefined) COUNCIL_MODEL_SYNTHESIST = (data.councilSynthesistModel || '').replace(/^local:/, '');
+    if (data.subagentModel !== undefined) process.env.SUBAGENT_MODEL = data.subagentModel || '';
+    if (data.orchestratorCtx !== undefined) process.env.ORCHESTRATOR_NUM_CTX = data.orchestratorCtx ? String(data.orchestratorCtx) : '';
+    if (data.subagentCtx !== undefined) process.env.SUBAGENT_NUM_CTX = data.subagentCtx ? String(data.subagentCtx) : '';
+    if (data.atlasCtx !== undefined) process.env.ATLAS_NUM_CTX = data.atlasCtx ? String(data.atlasCtx) : '';
+    if (data.toolsCtx !== undefined) process.env.TOOLS_NUM_CTX = data.toolsCtx ? String(data.toolsCtx) : '';
+    if (data.mercuryCtx !== undefined) process.env.MERCURY_NUM_CTX = data.mercuryCtx ? String(data.mercuryCtx) : '';
+    // Tool model follows SUBAGENT_MODEL (dashboard) → OLLAMA_CHAT_MODEL → orchestrator.
+    TOOL_MODEL = process.env.SUBAGENT_MODEL || process.env.OLLAMA_CHAT_MODEL || ORCHESTRATOR_MODEL || '';
+}
+
 const IPC_RESULTS_DIR = '/workspace/ipc/results';
 /**
  * Drain all pending IPC result files from tool executions.
@@ -977,8 +1012,10 @@ function delegateToolDef(s: SubAgentDef) {
 // share it (e.g. orchestrator=gemma4:latest, byte=granite); unloading a
 // shared model mid-turn crashes the orchestrator's next call (Ollama 500).
 let ORCHESTRATOR_MODEL = '';
-// Atlas/Artemis model — from dashboard Chat Model dropdown (input.model)
-let ATLAS_MODEL = 'deepseek-v4-pro:cloud';
+// Atlas/Artemis model — from dashboard Chat Model dropdown (input.model).
+// No baked-in default: when unset, Atlas falls back to the orchestrator model
+// (the dashboard global default), never to a hardcoded model string.
+let ATLAS_MODEL = '';
 // Council per-seat model overrides — from dashboard Council Seats dropdowns.
 // Empty string means "fall back to ATLAS_MODEL" (the default council behavior).
 let COUNCIL_MODEL_SKEPTIC = '';
@@ -1098,9 +1135,9 @@ function spawnAtlasBackgroundJob(task: string, context: any, urgent: boolean): s
     return jobId;
 }
 // Tool-calling sub-agent model (byte, dexter, iris) — from dashboard local:subagent_model.
-// The host always passes SUBAGENT_MODEL; the chain below is a last-resort default
-// (granite4.1:8b was removed — only cloud models are installed now).
-const TOOL_MODEL = process.env.SUBAGENT_MODEL || process.env.OLLAMA_CHAT_MODEL || process.env.ORCHESTRATOR_MODEL || 'gemma4:31b-cloud';
+// No hardcoded fallback: SUBAGENT_MODEL (dashboard) → OLLAMA_CHAT_MODEL → orchestrator
+// model (settings). `let` so applySettingsSync() can re-sync it every turn from the host.
+let TOOL_MODEL = process.env.SUBAGENT_MODEL || process.env.OLLAMA_CHAT_MODEL || ORCHESTRATOR_MODEL || '';
 
 // Models that ALWAYS reason internally and cannot reliably honor think:false.
 // kimi-k2.6:cloud is the known offender: when a request is sent with think:false
@@ -1740,6 +1777,8 @@ Because you are the orchestrator and not the specialist: never try to do hands-o
 
 The host is **Arch Linux** running **KDE Plasma on Wayland**. The system package manager is **pacman** — to install a package, use \`sudo pacman -S <pkg>\` (\`--needed\` to skip what's already installed, \`--noconfirm\` for non-interactive). Never use apt, apt-get, yum, dnf, brew, or pip for system packages — only pacman. Warden runs directly on the host with full filesystem and shell access; there is no container, sandbox, or cage. sudo is interactive — the user types the password in their terminal, so any task that needs a system package goes to **atlas**: atlas runs the pacman install once and tells the user a password prompt is waiting. Do not attempt package installs yourself; you have no shell.
 
+The dashboard has a **Notes** view — an Obsidian-style markdown vault rooted at \`~/Documents/Notes\`. Notes are plain \`.md\` files on disk with \`[[wiki-links]]\` and \`#tags\`; the dashboard is just a viewer/editor over them. If the user asks to read, find, create, edit, or organize a note, delegate to **atlas** to operate on files in that directory.
+
 # WHAT THE USER HEARS
 
 Exactly two things you produce are spoken aloud to the user: the {task} string you pass to a delegate (the host reads it to the user verbatim, as the announcement of what's happening), and the final reply that ends your turn. Any other text you emit around tool calls is discarded — never narrate your plan there.
@@ -1888,16 +1927,23 @@ Voice-first. Plain spoken sentences. No markdown — no asterisks, bullets, back
     })();
     messages.push({ role: 'system', content: systemPrompt + journalSection + fabricSection + skillIndexSection + orchestratorNowLine });
     let prompt = input.prompt;
-    // Three-model system:
-    //   orchestrator → input.orchestratorModel (dashboard Default Model), fallback gemma4:latest
-    //   tool callers (byte/dexter/iris) → SUBAGENT_MODEL env (dashboard local:subagent_model), fallback OLLAMA_CHAT_MODEL → ORCHESTRATOR_MODEL → gemma4:31b-cloud
-    //   atlas/artemis → ATLAS_MODEL (dashboard Chat Model dropdown), fallback deepseek-v4-pro:cloud
-    const model = input.orchestratorModel || 'gemma4:latest';
+    // Three-model system — every model comes from dashboard settings, re-synced each
+    //   turn via applySettingsSync() (no hardcoded fallbacks; a missing setting is
+    //   surfaced as an error instead of silently swapped for a baked-in model):
+    //   orchestrator → input.orchestratorModel (dashboard Default Model = orchestrator:model)
+    //   tool callers (byte/dexter/iris) → SUBAGENT_MODEL env (dashboard local:subagent_model) → OLLAMA_CHAT_MODEL → orchestrator
+    //   atlas/artemis → input.model (dashboard Chat Model dropdown) → orchestrator model
+    let model = (input.orchestratorModel || '').replace(/^local:/, '');
+    if (!model) {
+        writeOutput({ status: 'error', result: null, error: 'No orchestrator model configured in dashboard settings (set orchestrator:model). Refusing to fall back to a hardcoded default.' });
+        return;
+    }
     ORCHESTRATOR_MODEL = model;
-    ATLAS_MODEL = (input.model && input.model !== 'gemma4:latest') ? input.model : 'deepseek-v4-pro:cloud';
+    ATLAS_MODEL = (input.model || '').replace(/^local:/, '') || ORCHESTRATOR_MODEL;
     COUNCIL_MODEL_SKEPTIC = (input.councilSkepticModel || '').replace(/^local:/, '');
     COUNCIL_MODEL_PRAGMATIST = (input.councilPragmatistModel || '').replace(/^local:/, '');
     COUNCIL_MODEL_SYNTHESIST = (input.councilSynthesistModel || '').replace(/^local:/, '');
+    TOOL_MODEL = process.env.SUBAGENT_MODEL || process.env.OLLAMA_CHAT_MODEL || ORCHESTRATOR_MODEL || '';
     const toolContext = { chatJid: input.chatJid, groupFolder: input.groupFolder, isMain: input.isMain, userId: process.env.WARDEN_USER_ID || '' };
 
     if (input.activeIdea) {
@@ -1932,6 +1978,11 @@ Voice-first. Plain spoken sentences. No markdown — no asterisks, bullets, back
     // the user (otherwise the host drops it). Empty replies send nothing.
     let turnWasMonitorTick = false;
     while (true) {
+        // Re-sync the orchestrator model each turn from ORCHESTRATOR_MODEL, which
+        // applySettingsSync() keeps fresh on every IPC message. Without this the
+        // local `model` stays pinned to the first turn's value and dashboard model
+        // changes never reach the actual LLM call (the "settings didn't apply" bug).
+        model = ORCHESTRATOR_MODEL;
         // No per-turn flow-control reminder — the model replies when done and emits a
         // tool call when it needs one. (Completion guidance lives in the system prompt.)
         // The parent composes EVERY turn's prompt with <mercury_summary>/<mercury_context>/
