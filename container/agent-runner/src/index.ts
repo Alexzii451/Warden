@@ -2211,15 +2211,10 @@ Voice-first. Plain spoken sentences. No markdown — no asterisks, bullets, back
                                     if (raw)
                                         appendStatus({ phase: 'thinking', label: `Thinking: ${raw}` });
                                 }
-                                if (verbose) {
-                                    if (inThinkingBlock && showThinking) {
-                                        process.stderr.write(`\x1b[2m${content}\x1b[0m`);
-                                    }
-                                    else if (!inThinkingBlock) {
-                                        process.stderr.write(content);
-                                    }
+                                if (showThinking && inThinkingBlock) {
+                                    process.stderr.write(`\x1b[2m${content}\x1b[0m`);
                                 }
-                                else {
+                                else if (!inThinkingBlock) {
                                     process.stderr.write(content);
                                 }
                             }
