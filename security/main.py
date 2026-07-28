@@ -126,8 +126,6 @@ def main(argv: list[str] | None = None) -> int:
     )
     tracker = SituationTracker(
         presence_debounce=int(aware_cfg.get("presence_debounce", 3)),
-        empty_threshold_seconds=float(aware_cfg.get("empty_threshold_seconds", 60)),
-        departure_threshold_seconds=float(aware_cfg.get("departure_threshold_seconds", 30)),
         motion_min_area=int(aware_cfg.get("motion_min_area", 1500)),
         motion_movement_px=int(aware_cfg.get("motion_movement_px", 80)),
         camera_moved_threshold=int(aware_cfg.get("camera_moved_threshold", 16)),

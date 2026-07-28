@@ -22,8 +22,6 @@ Current simplifications (marked with # TODO: improvement comments):
 
 from __future__ import annotations
 
-import hashlib
-import logging
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -110,8 +108,6 @@ class SituationTracker:
     def __init__(
         self,
         presence_debounce: int = 3,
-        empty_threshold_seconds: float = 60.0,
-        departure_threshold_seconds: float = 30.0,
         motion_min_area: int = 1500,
         motion_movement_px: int = 80,
         camera_moved_threshold: int = 16,
@@ -119,8 +115,6 @@ class SituationTracker:
         object_min_confidence: float = 0.2,
     ):
         self.presence_debounce = max(1, presence_debounce)
-        self.empty_threshold_seconds = empty_threshold_seconds
-        self.departure_threshold_seconds = departure_threshold_seconds
         self.motion_min_area = motion_min_area
         self.motion_movement_px = motion_movement_px
         self.camera_moved_threshold = camera_moved_threshold
@@ -139,7 +133,6 @@ class SituationTracker:
         self._state_since = time.time()
         self._present_streak = 0
         self._absent_streak = 0
-        self._empty_since = time.time()
 
         # Camera-motion state.
         self._prev_phashes: deque = deque(maxlen=camera_moved_history)
@@ -168,15 +161,10 @@ class SituationTracker:
 
         # Match persons to existing IDs and update tracks.
         matched_ids, new_persons = self._update_tracks(persons_input, w, h)
+        current_count = len(self._tracked)
 
         # Compute room occupancy with debounce.
-        room_occupied, seconds_in_state = self._update_occupancy(
-            len(matched_ids) + len(new_persons), now
-        )
-        # Track how long the room has been empty continuously, reset on any presence.
-        if room_occupied:
-            self._empty_since = now
-        empty_duration = now - self._empty_since
+        room_occupied, seconds_in_state = self._update_occupancy(current_count, now)
 
         # Detect camera motion from whole-frame pHash differences.
         camera_moved = self._detect_camera_moved(frame_bgr, camera_covered)
@@ -213,8 +201,8 @@ class SituationTracker:
             events.append(ChangeEvent("camera_uncovered", data={"ts": ts}))
         self._prev_covered = camera_covered
 
-        # Camera moved: only meaningful when not covered. Add a dead-time so
-        # one physical camera adjustment doesn't spam repeated events.
+        # Camera moved: only meaningful when not covered. A 10s dead-time stops
+        # one physical adjustment from producing a stream of events.
         if camera_moved and (now - self._camera_moved_recent) >= 10.0:
             events.append(ChangeEvent(
                 "camera_moved",
@@ -222,30 +210,48 @@ class SituationTracker:
             ))
             self._camera_moved_recent = now
 
-        # Person arrivals: only when the room was empty long enough — ignore
-        # brief re-entries and people already in frame at startup.
+        # Person arrivals: a new ID means someone new came into view. Report it
+        # even if the room was already occupied — "one person, now two" is a change.
         for pid in new_persons:
-            if empty_duration >= self.empty_threshold_seconds:
+            events.append(ChangeEvent(
+                "arrival",
+                subject_id=pid,
+                data={"ts": ts, "person_count": len(persons_out)},
+            ))
+
+        # Room became occupied (0 -> >=1). Report this as a single "arrival"
+        # event summarising the new occupancy, unless we already emitted individual
+        # arrivals above.
+        if room_occupied and not self._room_occupied:
+            if not new_persons:
                 events.append(ChangeEvent(
                     "arrival",
-                    subject_id=pid,
-                    data={"ts": ts, "person_count": len(persons_out), "seconds_empty": round(empty_duration, 1)},
+                    data={"ts": ts, "person_count": len(persons_out), "summary": "room became occupied"},
                 ))
 
-        # Person departures: only after the person has been gone for the full
-        # departure threshold, and only if we had announced an arrival for them
-        # (or if the room was occupied for a while).
+        # Person departures: an ID is gone. Only report when the ID actually
+        # leaves the track set, not while it's briefly missing.
         departed_ids = [
             pid for pid, p in self._tracked.items()
             if p.frames_missing == self.presence_debounce and pid not in matched_ids
         ]
         for pid in departed_ids:
-            if seconds_in_state >= self.departure_threshold_seconds:
+            events.append(ChangeEvent(
+                "departure",
+                subject_id=pid,
+                data={"ts": ts, "seconds_occupied": round(seconds_in_state, 1)},
+            ))
+
+        # Room became empty (>=1 -> 0). Report as a single "departure" event
+        # summarising the transition.
+        if not room_occupied and self._room_occupied:
+            if not departed_ids:
                 events.append(ChangeEvent(
                     "departure",
-                    subject_id=pid,
-                    data={"ts": ts, "seconds_occupied": round(seconds_in_state, 1)},
+                    data={"ts": ts, "seconds_occupied": round(seconds_in_state, 1), "summary": "room became empty"},
                 ))
+
+        self._room_occupied = room_occupied
 
         # Movement of tracked people. Only flag significant centroid shifts, and
         # only once per person until they settle (track the last announced move).
@@ -256,6 +262,8 @@ class SituationTracker:
             dx = p.cx - prev[0]
             dy = p.cy - prev[1]
             dist = (dx * dx + dy * dy) ** 0.5
+            # TODO: instead of raw centroid shift, detect "stood up", "sat down",
+            # "approached camera" by keypoint changes (head/shoulder height).
             if dist >= self.motion_movement_px:
                 # Suppress repeated movement events from the same person until
                 # they move back near their last announced position or sit still.
