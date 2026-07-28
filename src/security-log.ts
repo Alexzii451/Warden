@@ -45,13 +45,6 @@ function getDb(): Database.Database {
     CREATE INDEX IF NOT EXISTS idx_security_log_ts ON security_log(ts);
     CREATE INDEX IF NOT EXISTS idx_security_log_assessment ON security_log(assessment);
     CREATE INDEX IF NOT EXISTS idx_security_log_camera ON security_log(camera);
-    CREATE TABLE IF NOT EXISTS known_persons (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      label TEXT NOT NULL,
-      frame_path TEXT NOT NULL,
-      phash TEXT,
-      created_at TEXT NOT NULL
-    );
   `);
   // In-place migrations: add any columns missing from an older schema (CREATE
   // TABLE IF NOT EXISTS won't upgrade an existing table). Idempotent — skips
@@ -157,31 +150,6 @@ export function securityLog(args: any): { ok: boolean; summary?: string; error?:
     }
 
     return { ok: false, error: `unknown action: ${action} (use record | query | stats)` };
-  } catch (err: any) {
-    return { ok: false, error: String(err?.message ?? err) };
-  }
-}
-
-/**
- * Save a known-person keyframe so the detector can skip flagging them
- * (application-side pHash compare). The host inserts {label, frame_path}; the
- * detector computes the pHash later (it has the image lib). Idempotent on label:
- * if a known_persons row with the same label exists, update its frame_path.
- */
-export function saveKnownPerson(args: any): { ok: boolean; error?: string } {
-  try {
-    const label = typeof args?.label === 'string' ? args.label.trim() : '';
-    const framePath = typeof args?.frame_path === 'string' ? args.frame_path.trim() : '';
-    if (!label || !framePath) return { ok: false, error: 'label and frame_path required' };
-    const d = getDb();
-    const existing = d.prepare('SELECT id FROM known_persons WHERE label = ?').get(label) as { id: number } | undefined;
-    if (existing) {
-      d.prepare('UPDATE known_persons SET frame_path = ?, phash = NULL WHERE id = ?').run(framePath, existing.id);
-    } else {
-      d.prepare('INSERT INTO known_persons (label, frame_path, phash, created_at) VALUES (?, ?, NULL, ?)')
-        .run(label, framePath, new Date().toISOString());
-    }
-    return { ok: true };
   } catch (err: any) {
     return { ok: false, error: String(err?.message ?? err) };
   }

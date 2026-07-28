@@ -39,10 +39,11 @@ def _draw_keypoints(frame: np.ndarray, kps, color=(0, 200, 255)) -> None:
 
 
 def annotate(frame_bgr: np.ndarray, detections) -> np.ndarray:
+    """Draw detections on the frame. Only the keypoint tracking dots are drawn
+    (no bounding boxes, no labels) — the dots are enough to see what's tracked
+    without cluttering the feed."""
     out = frame_bgr.copy()
     for det in detections.detections:
-        label = f"{det.class_name} {det.confidence:.2f}"
-        _draw_box(out, det.xyxy, label)
         _draw_keypoints(out, det.keypoints)
     return out
 

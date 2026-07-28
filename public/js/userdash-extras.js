@@ -704,18 +704,28 @@ window.UserDash = (() => {
   let waitingForReply = false;
   let statusPollInterval = null;
 
-  // Thinking bar management
+  // Thinking bar management. The bar is always visible: while processing it
+  // shows live stderr thinking tokens; when idle it shows "Idle" and acts as
+  // a clickable handle to reveal the activity history (progress panel).
   var thinkingWords = [];
-  function clearThinkingBar() {
+  function setThinkingIdle() {
     const bar = document.getElementById('thinkingBar');
     const content = document.getElementById('thinkingContent');
     if (bar) {
-      bar.style.display = 'none';
+      bar.style.display = '';
       bar.classList.remove('has-content');
+      bar.classList.add('idle');
     }
-    if (content) content.innerHTML = '';
+    if (content) content.textContent = 'Idle';
     thinkingWords.length = 0;
+    // Reconcile with the global busy state so the bar doesn't read "Idle"
+    // while the progress panel beside it shows activity (background jobs,
+    // other containers, etc.).
+    if (window.Warden && typeof window.Warden.syncThinkingBar === 'function') {
+      window.Warden.syncThinkingBar();
+    }
   }
+  function clearThinkingBar() { setThinkingIdle(); }
 
   function showTypingIndicator() {
     let el = document.getElementById('typingIndicator');
@@ -763,6 +773,7 @@ window.UserDash = (() => {
               content.textContent = thinkingWords.join(' ');
               bar.style.display = '';
               bar.classList.add('has-content');
+              bar.classList.remove('idle');
               bar.scrollLeft = bar.scrollWidth;
             }
           }
@@ -879,6 +890,23 @@ window.UserDash = (() => {
 
   async function sendChatText(text) {
     if (!text || !currentSession) return;
+
+    // Panic word: a bare "stop" hard-kills the running agent (immediate
+    // SIGKILL) instead of being sent as a chat message. No optimistic
+    // bubble, no typing indicator — it's a control word, not a message.
+    if (text.trim().toLowerCase() === 'stop') {
+      try {
+        await fetch('/api/chat/stop', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-User-Session': userSession() },
+          body: JSON.stringify({ jid: currentSession, hard: true, advance_cursor: true })
+        });
+      } catch {}
+      stopSuppressUntil = Date.now() + 10000;
+      hideTypingIndicator();
+      toast('Hard stop — agent killed', 'info');
+      return;
+    }
 
     const modelSelect = document.getElementById('modelSelect');
     const model = modelSelect ? modelSelect.value : '';
@@ -2129,6 +2157,7 @@ window.UserDash = (() => {
         content.textContent = joined;
         bar.style.display = '';
         bar.classList.add('has-content');
+        bar.classList.remove('idle');
         bar.scrollLeft = bar.scrollWidth;
       }
       return;

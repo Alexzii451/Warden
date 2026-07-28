@@ -801,6 +801,16 @@ async function handleMessages(
     if (!body.text) return error(res, 'text required');
     const jid = body.jid || WEB_DASHBOARD_JID;
 
+    // Panic word: a bare "stop" hard-kills the whole system instead of being
+    // delivered to the agent as a chat message. The message is NOT stored,
+    // relayed, or queued — it is a control word, not a chat message.
+    if (!body.is_bot_message && body.text.trim().toLowerCase() === 'stop') {
+      const killed = killCurrentAgent(true);
+      setRouterState('agent:processing', 'false');
+      logger.info({ jid, killed }, 'Hard-kill control word "stop" received');
+      return json(res, { ok: true, hardKill: true, killed });
+    }
+
     // Bot message mode: store + relay without triggering agent
     if (body.is_bot_message) {
       const msg: NewMessage = {
@@ -1328,6 +1338,7 @@ function handleSettings(res: http.ServerResponse): void {
     councilSkepticModel: getRouterState('council:skeptic_model') || '',
     councilPragmatistModel: getRouterState('council:pragmatist_model') || '',
     councilSynthesistModel: getRouterState('council:synthesist_model') || '',
+    heimdallModel: getRouterState('heimdall:model') || '',
     ollamaEnabled: getRouterState('ollama_enabled') === 'true',
     automationModel: getRouterState('automation:model') || '',
     hybridPrivacy: getRouterState('hybrid_privacy') || '',
@@ -1395,6 +1406,12 @@ async function handleSettingsSave(
   }
   if (body.councilSynthesistModel !== undefined) {
     setRouterState('council:synthesist_model', String(body.councilSynthesistModel));
+  }
+  // Heimdall (background security agent) model — blank inherits the orchestrator
+  // model. Heimdall needs vision to read alert frames; set this to a local vision
+  // model if the cloud orchestrator model 500s on Ollama's images field.
+  if (body.heimdallModel !== undefined) {
+    setRouterState('heimdall:model', String(body.heimdallModel || ''));
   }
   // Mirror toolcall model into router_state and live env so subprocess inherits it.
   if (body.ollamaChatModel !== undefined) {
@@ -2212,7 +2229,8 @@ async function handleChatStop(
   // Multi-user scope check removed; single-user Warden has no per-user gates.
   void scopeUserId;
   // For the single-user backend, also kill the in-process agent directly.
-  const killed = killCurrentAgent();
+  // body.hard = true → immediate SIGKILL (the "stop" panic word).
+  const killed = killCurrentAgent(!!body.hard);
   if (body.soft) {
     // Soft stop: queue is a stub now; no-op.
     deps.queue.closeStdin(jid);

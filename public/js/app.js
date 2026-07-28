@@ -295,6 +295,31 @@
   window.__localSwitchView = switchView;
 
   // ============================================================= Status / verbose bar
+  // Last known global busy state + latest progress label, updated by
+  // pollStatus. Used by syncThinkingBar to keep the always-on thinking bar
+  // consistent with the progress panel beside it (background jobs, other
+  // containers, etc. — not just the current session's waitingForReply).
+  let lastBusy = false;
+  let lastProgressLabel = '';
+
+  // Reconcile the thinking bar's idle/active label with the global busy
+  // state. Live stderr thinking tokens for the current session take
+  // precedence (signalled by the `has-content` class set by userdash-extras);
+  // otherwise the bar mirrors busy: "Working…" / latest label, or "Idle".
+  function syncThinkingBar() {
+    const bar = $('thinkingBar');
+    const content = $('thinkingContent');
+    if (!bar || !content) return;
+    if (bar.classList.contains('has-content')) return; // live tokens showing
+    if (lastBusy) {
+      bar.classList.remove('idle');
+      content.textContent = lastProgressLabel || 'Working…';
+    } else {
+      bar.classList.add('idle');
+      content.textContent = 'Idle';
+    }
+  }
+
   async function pollStatus() {
     try {
       const d = await api('/api/status');
@@ -319,13 +344,17 @@
 
       // live activity panel (grouped collapsible progress history) — replaces
       // the old static verbose bar; its collapsed summary line is the live
-      // status, and expanding it shows the history. Clear it to "No live
-      // activity" when nothing is happening so it doesn't stick on the last
-      // completed step. Keep it populated while background jobs (atlas/artemis)
-      // run too — those bump runningJobs without marking a foreground group
+      // status, and expanding it shows the history. Keep it populated even
+      // when idle so the user can always click the thinking bar to review
+      // what just ran (tool/agent activity history). Background jobs
+      // (atlas/artemis) bump runningJobs without marking a foreground group
       // active, so the `active`-only check would blank the panel mid-work.
       const busy = active || (typeof d.runningJobs === 'number' && d.runningJobs > 0);
-      renderProgressPanel(busy ? (d.progress || []) : []);
+      const progress = d.progress || [];
+      lastBusy = busy;
+      lastProgressLabel = progress.length ? (progress[progress.length - 1].label || progress[progress.length - 1].phase || '') : '';
+      renderProgressPanel(progress, busy);
+      syncThinkingBar();
 
       // stop button enable/disable
       $('btnStop').disabled = !active;
@@ -340,7 +369,7 @@
   // and surface as 'supervisor' entries; real atlas/council status changes
   // surface as 'status' entries. Collapsed = one summary line; expanded = the
   // recent history.
-  function renderProgressPanel(events) {
+  function renderProgressPanel(events, busy) {
     const panel = $('progressPanel');
     const summary = $('progressSummary');
     const countEl = $('progressCount');
@@ -356,7 +385,11 @@
     }
     panel.classList.remove('empty');
     const latest = evs[evs.length - 1];
-    summary.textContent = latest.label || latest.phase || 'Working…';
+    // While idle, prefix the summary so it's clear nothing is currently
+    // running — the last event label is still shown as a hint to history.
+    summary.textContent = busy
+      ? (latest.label || latest.phase || 'Working…')
+      : ('Idle — last: ' + (latest.label || latest.phase || '—'));
     countEl.textContent = `${evs.length} update${evs.length > 1 ? 's' : ''}`;
     // Render newest-first inside the expanded body.
     const rows = evs.slice().reverse().map((e) => {
@@ -864,6 +897,10 @@
           <select class="select small" id="sMercuryCtx">${buildCtxOptions(d.mercuryCtx)}</select>
           <span class="dim mono" style="font-size:10px">blank = model default</span>
         </div>
+        <div class="setting-row"><label>Heimdall</label>
+          <select class="select" id="sHeimdallModel">${anyModelHtml}</select>
+          <span class="dim mono" style="font-size:10px">security agent; blank = inherit orchestrator; needs vision</span>
+        </div>
         <div class="setting-row"><label>Thinking</label>
           <select class="select" id="sThinking">
             <option value="true">On — first turn + always-think models</option>
@@ -924,6 +961,7 @@
     setSelect('sMercury', d.mercuryMode || 'full');
     setSelect('sMercuryModel', (d.mercuryModel || '').replace(/^local:/, ''));
     setSelect('sMercuryCtx', d.mercuryCtx || '');
+    setSelect('sHeimdallModel', (d.heimdallModel || '').replace(/^local:/, ''));
     setSelect('sThinking', d.thinking || 'true');
     setSelect('sOrchestratorCtx', d.orchestratorCtx || '');
     setSelect('sAtlasCtx', d.atlasCtx || '');
@@ -1026,6 +1064,7 @@
         mercuryMode: $('sMercury').value,
         mercuryModel: stripLocal($('sMercuryModel').value),
         mercuryCtx: $('sMercuryCtx').value,
+        heimdallModel: stripLocal($('sHeimdallModel').value),
         thinking: $('sThinking').value,
         orchestratorCtx: $('sOrchestratorCtx').value,
         atlasCtx: $('sAtlasCtx').value,
@@ -2175,7 +2214,8 @@
       ta.style.height = Math.min(ta.scrollHeight, 200) + 'px';
     });
 
-    // Live activity panel — collapse toggle (persisted)
+    // Live activity panel — collapse toggle (persisted). The thinking bar
+    // also toggles it, so an idle bar can be clicked to reveal history.
     const ppHeader = $('progressPanelHeader');
     if (ppHeader) {
       ppHeader.addEventListener('click', toggleProgressPanel);
@@ -2185,6 +2225,13 @@
           if (panel) { panel.classList.remove('collapsed'); ppHeader.setAttribute('aria-expanded', 'true'); }
         }
       } catch {}
+    }
+    const tb = $('thinkingBar');
+    if (tb) {
+      tb.addEventListener('click', toggleProgressPanel);
+      tb.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleProgressPanel(); }
+      });
     }
 
     // Tasks
@@ -2255,5 +2302,5 @@
   document.addEventListener('DOMContentLoaded', init);
 
   // Expose a small surface for debugging
-  window.Warden = { STATE, sendChat, pollChat, pollStatus, refreshTasks, refreshSkills, refreshActivity, refreshAccounts, deleteApiKey };
+  window.Warden = { STATE, sendChat, pollChat, pollStatus, refreshTasks, refreshSkills, refreshActivity, refreshAccounts, deleteApiKey, syncThinkingBar };
 })();

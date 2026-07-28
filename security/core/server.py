@@ -6,8 +6,10 @@ camera (for the cheap detector + GUI); this server lets Warden's
 the device. That's what makes on-demand "look at the camera and describe"
 work during the demo.
 
-  GET /frame   → the latest captured JPEG (image/jpeg)
-  GET /status  → {"state": ..., "last_alert_ts": ...}
+  GET /frame    → the latest captured JPEG (image/jpeg)
+  GET /status   → {"state": ..., "armed": ..., "last_alert_ts": ...}
+  POST /alert/open, /alert/close — Heimdall spawns/closes an alert.
+  POST /arm, /disarm — arm/disarm the system (the guard's chat command).
 
 `set_frame()` is called by the main loop on every capture; `set_state()` on
 state changes. Both are thread-safe.
@@ -29,6 +31,7 @@ class FrameServer:
         self.port = port
         self._frame: bytes = b""
         self._state: str = "IDLE"
+        self._armed: bool = True
         self._last_alert_ts: str = ""
         self._lock = threading.Lock()
         self._httpd: ThreadingHTTPServer | None = None
@@ -39,6 +42,10 @@ class FrameServer:
         # Called when Warden POSTs /alert/open — Heimdall declared the flagged
         # detection abnormal; the main loop opens the alert (red button).
         self.on_alert_open = None
+        # Called when Warden POSTs /arm or /disarm — the guard's chat command
+        # to arm/disarm the whole system (disarmed = no flagging to Warden).
+        self.on_arm = None
+        self.on_disarm = None
 
     # ── producers (main loop) ────────────────────────────────────────────────
     def set_frame(self, jpeg_bytes: bytes) -> None:
@@ -50,6 +57,14 @@ class FrameServer:
             self._state = state
             if last_alert_ts is not None:
                 self._last_alert_ts = last_alert_ts
+
+    def set_armed(self, armed: bool) -> None:
+        with self._lock:
+            self._armed = armed
+
+    def is_armed(self) -> bool:
+        with self._lock:
+            return self._armed
 
     def request_close(self) -> bool:
         """Warden closed the alert. Returns True if a handler re-armed."""
@@ -71,6 +86,28 @@ class FrameServer:
             return True
         except Exception as e:
             log.warning("alert open handler error: %s", e)
+            return False
+
+    def request_arm(self) -> bool:
+        """The guard armed the system from chat → enable flagging."""
+        if self.on_arm is None:
+            return False
+        try:
+            self.on_arm()
+            return True
+        except Exception as e:
+            log.warning("arm handler error: %s", e)
+            return False
+
+    def request_disarm(self) -> bool:
+        """The guard disarmed the system from chat → stop flagging."""
+        if self.on_disarm is None:
+            return False
+        try:
+            self.on_disarm()
+            return True
+        except Exception as e:
+            log.warning("disarm handler error: %s", e)
             return False
 
     # ── lifecycle ────────────────────────────────────────────────────────────
@@ -98,6 +135,7 @@ class FrameServer:
                     with server._lock:
                         body = json.dumps({
                             "state": server._state,
+                            "armed": server._armed,
                             "last_alert_ts": server._last_alert_ts,
                         })
                     self.send_response(200)
@@ -124,6 +162,22 @@ class FrameServer:
                 elif self.path == "/alert/open":
                     ok = server.request_open()
                     body = json.dumps({"ok": ok, "state": server._state})
+                    self.send_response(200 if ok else 503)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(body.encode())
+                # Guard's chat command: arm the system (enable flagging).
+                elif self.path == "/arm":
+                    ok = server.request_arm()
+                    body = json.dumps({"ok": ok, "armed": server._armed, "state": server._state})
+                    self.send_response(200 if ok else 503)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(body.encode())
+                # Guard's chat command: disarm the system (stop flagging).
+                elif self.path == "/disarm":
+                    ok = server.request_disarm()
+                    body = json.dumps({"ok": ok, "armed": server._armed, "state": server._state})
                     self.send_response(200 if ok else 503)
                     self.send_header("Content-Type", "application/json")
                     self.end_headers()

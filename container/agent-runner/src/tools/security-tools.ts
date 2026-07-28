@@ -11,18 +11,19 @@ async function callHost(tool: string, args: any, timeoutMs = 10000): Promise<any
 
 // Security Mode tools (Heimdall, the background security agent). The standalone
 // detector app holds an alert OPEN until Warden closes it; close_security_alert
-// re-arms it. alert_security is the MOCK external-escalation call (no real guard
-// service yet — it just acknowledges it would alert them). send_message lets
-// Heimdall tell the user about an abnormal alert. get_time + security_log let it
-// reference events by exact time and persist/query a conditions history.
+// (via dismiss_security_flag) re-arms it. alert_security is the MOCK
+// external-escalation call (no real guard service yet — it just acknowledges it
+// would alert them). arm_security/disarm_security toggle the detector's
+// flagging. send_message lets Heimdall tell the user about an abnormal alert.
+// security_log lets it persist/query a dated conditions history.
 
 registry.register({
     name: 'dismiss_security_flag',
     description:
         "Dismiss a flagged review and re-arm the detector. Call this ONCE, ONLY when you DECLARE " +
         "the flagged detection NORMAL (a non-event) — it clears the flag so the detector can review " +
-        "the next detection. This does NOT close a spawned alert — you cannot close alerts; only " +
-        "the guard at the keyboard can (STAND DOWN button). Never call this on an abnormal alert.",
+        "the next detection. This also closes any open alert (equivalent to the guard pressing " +
+        "STAND DOWN). Never call this on an abnormal alert you want to stay open.",
     schema: { type: 'object', properties: {} },
     handler: async (_args, _context) => {
         const resp = await callHost('close_security_alert', {});
@@ -60,12 +61,42 @@ registry.register({
 });
 
 registry.register({
+    name: 'arm_security',
+    description:
+        "Arm the security system — enable the detector's flagging (so it raises alerts to Heimdall). " +
+        "Use this when the user wants flagging on.",
+    schema: { type: 'object', properties: {} },
+    handler: async (_args, _context) => {
+        const resp = await callHost('arm_security', {});
+        if (resp?.ok) return 'Security system armed — flagging enabled.';
+        return `Could not arm: ${resp?.error || 'security app not reachable'}`;
+    },
+    toolset: 'security',
+    tier: 'public',
+});
+
+registry.register({
+    name: 'disarm_security',
+    description:
+        "Disarm the security system — pause the detector's flagging (no alerts raised to Heimdall). " +
+        "Use this when the user wants flagging off.",
+    schema: { type: 'object', properties: {} },
+    handler: async (_args, _context) => {
+        const resp = await callHost('disarm_security', {});
+        if (resp?.ok) return 'Security system disarmed — flagging paused.';
+        return `Could not disarm: ${resp?.error || 'security app not reachable'}`;
+    },
+    toolset: 'security',
+    tier: 'public',
+});
+
+registry.register({
     name: 'open_security_alert',
     description:
         "Spawn the security alert on the detector: opens the red STAND DOWN button + flips the " +
         "detector to ALERTED. Call this ONCE, only when you DECLARE the flagged detection ABNORMAL, " +
         "after alert_security and send_message. Do NOT call it for a normal/non-event. The alert " +
-        "then stays open until the guard at the keyboard presses STAND DOWN.",
+        "then stays open until cleared (dismiss_security_flag) or the guard presses STAND DOWN.",
     schema: {
         type: 'object',
         properties: {
@@ -78,66 +109,6 @@ registry.register({
         return `Could not open security alert: ${resp?.error || 'detector app not reachable'}`;
     },
     toolset: 'security',
-    tier: 'public',
-});
-
-registry.register({
-    name: 'save_known_person',
-    description:
-        "Save a keyframe for a person you RECOGNIZE as normal (e.g. the owner) so the detector " +
-        "skips flagging them in future — no Heimdall round-trip for known people. Call this ONCE, " +
-        "ONLY on a NORMAL verdict, with a label (e.g. 'owner') and the frame_path of the alert " +
-        "frame (the [Image: ...] path from the task, e.g. 'groups/owner/attachments/sec-<ts>.jpg'). " +
-        "The detector pHash-compares new frames to saved keyframes and skips flagging matches. " +
-        "Do NOT call this for an abnormal/unknown person.",
-    schema: {
-        type: 'object',
-        properties: {
-            label: { type: 'string', description: 'A name for this person, e.g. "owner".' },
-            frame_path: { type: 'string', description: 'The alert frame path from the task [Image: ...].' },
-        },
-        required: ['label', 'frame_path'],
-    },
-    handler: async (args, _context) => {
-        const resp = await callHost('save_known_person', {
-            label: String(args?.label || ''),
-            frame_path: String(args?.frame_path || ''),
-        });
-        if (resp?.ok) return `Saved known person "${args?.label}" — the detector will skip flagging them.`;
-        return `Could not save known person: ${resp?.error || 'unknown error'}`;
-    },
-    toolset: 'security',
-    tier: 'public',
-});
-
-// Orchestrator → Heimdall direct. The orchestrator calls this to pass a message
-// to the Heimdall security agent (e.g. "the person with glasses is the owner,
-// normal") instead of routing through Atlas. Heimdall records it in security_log
-// as context for future reviews. tier:'public' + toolset 'chat' keeps it
-// orchestrator-only (sub-agents don't include 'chat'; 'public' keeps it out of
-// BOTH_TOOL_DEFS so it doesn't leak to sub-agents).
-registry.register({
-    name: 'tell_heimdall',
-    description:
-        "Send a message directly to Heimdall, the background security agent. Use this when the " +
-        "user wants to tell the security agent something (e.g. 'the person with glasses is the " +
-        "owner — that's normal', or a fact about the space) so Heimdall records it and factors it " +
-        "into future alert decisions. Do NOT use Atlas or other agents for security-agent " +
-        "communication — use this. Heimdall records the message silently; it will not reply in " +
-        "the chat. Returns confirmation.",
-    schema: {
-        type: 'object',
-        properties: {
-            message: { type: 'string', description: 'The message to pass to Heimdall.' },
-        },
-        required: ['message'],
-    },
-    handler: async (args, _context) => {
-        const resp = await callHost('tell_heimdall', { message: String(args?.message || '') });
-        if (resp?.ok) return `Told Heimdall: ${String(args?.message || '').slice(0, 120)}. It will record this for future reviews.`;
-        return `Could not reach Heimdall: ${resp?.error || 'unknown error'}`;
-    },
-    toolset: 'chat',
     tier: 'public',
 });
 

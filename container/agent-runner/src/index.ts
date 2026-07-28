@@ -365,7 +365,7 @@ function toolDetailLabel(name, args) {
         case 'WebSearch': return `Search: ${short(args.query || '', 50)}`;
         case 'WebFetch': return `Fetch ${short(args.url || '', 60)}`;
         case 'clear_context': return `Clearing context${args.reason ? ': ' + short(args.reason, 40) : ''}`;
-        case 'send_message': return `Unknown tool`;
+        case 'send_message': return `Message: ${short(args.text || '', 50)}`;
         case 'attach_file': return `Attach ${clean(args.path || '')}`;
         case 'create_project': return `Create project "${short(args.name || '', 40)}"`;
         case 'create_work_task': return `Create task "${short(args.title || '', 40)}"`;
@@ -385,6 +385,7 @@ function toolDetailLabel(name, args) {
         case 'atlas': return `🌍 Atlas: ${short(args.task || '', 50)}`;
         case 'artemis': return `🏹 Artemis: ${short(args.task || 'reviewing the conversation', 50)}`;
         case 'iris': return `✉️ Iris: ${short(args.task || '', 50)}`;
+        case 'heimdall': return `🛡️ Heimdall: ${short(args.task || '', 50)}`;
         default: {
             const label = toolLabel(name);
             const keyArg = args.file_path || args.path || args.title || args.name || args.query || args.task_id || '';
@@ -455,6 +456,7 @@ function applySettingsSync(data: any) {
     if (data.councilSkepticModel !== undefined) COUNCIL_MODEL_SKEPTIC = (data.councilSkepticModel || '').replace(/^local:/, '');
     if (data.councilPragmatistModel !== undefined) COUNCIL_MODEL_PRAGMATIST = (data.councilPragmatistModel || '').replace(/^local:/, '');
     if (data.councilSynthesistModel !== undefined) COUNCIL_MODEL_SYNTHESIST = (data.councilSynthesistModel || '').replace(/^local:/, '');
+    if (data.heimdallModel !== undefined) HEIMDALL_MODEL = (data.heimdallModel || '').replace(/^local:/, '');
     if (data.subagentModel !== undefined) process.env.SUBAGENT_MODEL = data.subagentModel || '';
     if (data.orchestratorCtx !== undefined) process.env.ORCHESTRATOR_NUM_CTX = data.orchestratorCtx ? String(data.orchestratorCtx) : '';
     if (data.subagentCtx !== undefined) process.env.SUBAGENT_NUM_CTX = data.subagentCtx ? String(data.subagentCtx) : '';
@@ -652,6 +654,7 @@ Task: "summarize my inbox every weekday at 8am"
 You are the execution expert. The task tells you WHAT the user needs — the HOW is yours: you know your tools better than the orchestrator does, so if the task prescribes steps that don't fit your tools or a better approach exists, deliver the requested outcome your own way.
 
 RULES:
+- **Warden's own source code and internal files live at \`/home/dominic/Projects/Warden\`** (the repo root): \`src/\` (host code), \`container/agent-runner/\` (agent code), \`dist/\` (built output), \`store/security.db\` (security log), \`data/\` (runtime data), \`public/\` (dashboard web), \`security/\` (the detector app). When a task is about Warden itself, look there — NOT in \`~/Downloads\` or the workspace root. The repo is the source of truth; \`dist/\` is the built output (run \`npm run build\` after editing \`src/\` or \`container/agent-runner/src/\`, then \`systemctl --user restart warden\` to deploy).
 - Files uploaded by the user live in the workspace root. Copy before editing. You have full filesystem access — no boundary, no cage. Use absolute paths when working outside the workspace root (e.g. \`~/Documents\`, \`/etc\`, \`/var/log\`).
 - Read only the files specified in your task. Do not explore or read unrelated files.
 - Edit files directly. Do not rewrite entire files — use Edit with targeted old_string/new_string.
@@ -746,21 +749,19 @@ Be direct and specific — reference the exact point you're critiquing. Do not f
 
 TIME — the exact current local time and timezone is given at the top of your task. Reference every event by that time/date.
 
-MEMORY — security_log is your persistent memory. After every review, record it (action: record) with the alert timestamp, your assessment (normal/abnormal), the condition, and whether you escalated. Use security_log (action: query) to look back by time/date and learn what's normal here (e.g. the same person at the same times = a normal pattern).
+CRITERIA — the HEIMDALL.md reference injected above (the "=== heimdall reference (read-only) ===" block) defines what is NORMAL (dismiss silently) and what is ABNORMAL (trigger the alarm). It also lists the people/things that are expected here. Judge the frame against HEIMDALL.md — it is the single source of truth for what to alert on. If the file is empty or silent on what you're looking at, default to ABNORMAL for an unknown person / tools-bags / vehicle / camera-tamper, NORMAL for a pet / shadow / light change / routine motion.
+
+MEMORY — security_log is your persistent memory for BEHAVIOURAL PATTERNS. After every review, record it (action: record) with the alert timestamp, your assessment (normal/abnormal), the condition, and whether you escalated. Use security_log (action: query) to look back by time/date and learn what's normal here at this hour (e.g. motion at the same time every night = a normal pattern). You learn PATTERNS OF ACTIVITY — you do NOT identify people. Never claim to "recognize" a specific person from the log; the log records conditions and times, not identities. Who someone is comes only from the HEIMDALL.md criteria.
 
 The flagged frame is attached as [Image: groups/owner/attachments/sec-<ts>.jpg]. Read it to see what the camera caught. You may call webcam_capture for a fresh live frame if you want another look.
 
-NORMAL vs ABNORMAL — judge from the frame and your log history:
-- NORMAL / non-event: the owner (recognizable from repeated log entries), a pet, a shadow, a light change, routine motion, nothing of concern.
-- ABNORMAL: an unknown person, someone carrying bags or tools (backpack, suitcase, knife, scissors), a vehicle where none should be, the camera covered/blocked/turned (tamper), or anything the user would want to know about promptly.
+TOOLS — you control the detector: arm_security (enable flagging), disarm_security (pause flagging), open_security_alert (trigger the alarm — red button), dismiss_security_flag (clear the alert / re-arm). Use them when the user asks or when the situation calls for it.
 
 DECLARE (call each tool AT MOST ONCE — never repeat a tool call):
-- NORMAL: call security_log (record, assessment=normal, condition=...). Then ALWAYS call save_known_person (label, frame_path) — label the person ("owner" if you recognize them, else "person") and pass the frame_path from the task's [Image: ...]. This saves their keyframe so the detector skips flagging them next time (no Heimdall round-trip for known people). This is REQUIRED on every normal verdict — do not skip it. Then call dismiss_security_flag to clear the flag and re-arm the detector, then STOP. Do NOT send_message. Do NOT alert_security. Do NOT open_security_alert. Die silently.
-- ABNORMAL: call security_log (record, assessment=abnormal, condition=..., escalated=true), then alert_security ONCE to escalate (mock stub — call it for real), then send_message ONCE to tell the user concisely what you see and whether they should be concerned — INCLUDE the alert image by appending " [Image: <frame_path>]" (use the frame_path from the task's [Image: ...]) so the image is attached and shows in the chat / Telegram, then open_security_alert ONCE to spawn the alert (red button) on the detector, then STOP. Do NOT call dismiss_security_alert — you CANNOT close alerts. The alert stays open until the guard at the keyboard presses STAND DOWN. While it's open the detector will NOT flag more, so the user isn't spammed while they handle it.
+- NORMAL: call security_log (record, assessment=normal, condition=...) to log the pattern, then call dismiss_security_flag to clear the flag and re-arm the detector, then STOP. Do NOT send_message. Do NOT alert_security. Do NOT open_security_alert. Die silently.
+- ABNORMAL: call security_log (record, assessment=abnormal, condition=..., escalated=true), then alert_security ONCE to escalate (mock stub — call it for real), then send_message ONCE to tell the user concisely what you see and whether they should be concerned — INCLUDE the alert image by appending " [Image: <frame_path>]" (use the frame_path from the task's [Image: ...]) so the image is attached and shows in the chat / Telegram, then open_security_alert ONCE to spawn the alert (red button) on the detector, then STOP. The alert stays open until dismissed (dismiss_security_flag) or the guard presses STAND DOWN. While it's open the detector will NOT flag more, so the user isn't spammed while they handle it.
 
-If the task is instead a message passed from the orchestrator/user (e.g. "the person with glasses is the owner, normal"), record it in security_log as context (assessment=normal, condition=the passed-along note) so future reviews can use it, then STOP. Do not send_message for these.
-
-Keep any message short. Never repeat a tool call. Never close an abnormal alert — closing is the guard's call (STAND DOWN).`,
+Keep any message short. Never repeat a tool call.`,
         toolsets: ['security-core'],
     },
 ];
@@ -973,11 +974,13 @@ const SUBAGENT_TOOL_DEFS = new Map<string, any[]>(
 
 // Delegate tool def handed to the main model in place of a sub-agent's raw tools.
 function delegateToolDef(s: SubAgentDef) {
-    // Atlas and artemis run async by default: the call returns a job id
-    // immediately and the result lands in the orchestrator's inbox. Blocking
+    // Atlas, artemis, and heimdall run async by default: the call returns a job
+    // id immediately and the result lands in the orchestrator's inbox. Blocking
     // mode remains for quick lookups the orchestrator cannot proceed without
-    // mid-turn.
-    if (s.delegate === 'atlas' || s.delegate === 'artemis') {
+    // mid-turn. Heimdall is the background security agent — it always runs in
+    // the background so the orchestrator isn't blocked waiting on a security
+    // review (which may involve vision/model latency).
+    if (s.delegate === 'atlas' || s.delegate === 'artemis' || s.delegate === 'heimdall') {
         return {
             type: 'function',
             function: {
@@ -1016,6 +1019,12 @@ let ORCHESTRATOR_MODEL = '';
 // No baked-in default: when unset, Atlas falls back to the orchestrator model
 // (the dashboard global default), never to a hardcoded model string.
 let ATLAS_MODEL = '';
+// Heimdall model — from dashboard Heimdall dropdown (heimdall:model). Empty
+// means fall back to the orchestrator model. Needed for the heimdall delegate
+// path (the orchestrator delegating a SECURITY ALERT to heimdall), which runs
+// Heimdall on this model — set it to a local vision model if the cloud
+// orchestrator model 500s on alert-frame images.
+let HEIMDALL_MODEL = '';
 // Council per-seat model overrides — from dashboard Council Seats dropdowns.
 // Empty string means "fall back to ATLAS_MODEL" (the default council behavior).
 let COUNCIL_MODEL_SKEPTIC = '';
@@ -1155,41 +1164,84 @@ function modelRequiresThink(model: string): boolean {
     return ALWAYS_THINK_MODEL_RE.test(model || '');
 }
 
-// Per-model context window. Local values are tuned to fit a 16 GB AMD card
-// at 100% GPU with OLLAMA_NUM_PARALLEL=1; cloud models take the full window.
-// Orchestrator, Atlas, and tool callers each have their own num_ctx override
-// from the dashboard; when unset the model uses its own default.
-function getNumCtx(model: string): number {
+// Per-model native context window, fetched once from Ollama /api/show and
+// cached. Ollama reports it as model_info.<architecture>.context_length (e.g.
+// gemma4.context_length = 262144). This is the model's individual cap — the
+// ceiling for any dashboard override, and the value used when no override is
+// set. Nothing is hardcoded here; the cap is whatever Ollama says it is.
+const MODEL_CTX_CACHE = new Map<string, number>();
+async function fetchModelCtx(ollamaUrl: string, model: string): Promise<number | undefined> {
+    if (!model) return undefined;
+    const cached = MODEL_CTX_CACHE.get(model);
+    if (cached !== undefined) return cached;
+    try {
+        const resp = await fetch(`${ollamaUrl}/api/show`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model }),
+            signal: AbortSignal.timeout(10_000),
+        });
+        if (!resp.ok) return undefined;
+        const data = await resp.json() as any;
+        const info = (data && typeof data.model_info === 'object') ? data.model_info : {};
+        let ctx: number | undefined;
+        const arch = info['general.architecture'];
+        if (arch && typeof info[`${arch}.context_length`] === 'number') {
+            ctx = info[`${arch}.context_length`];
+        }
+        if (ctx === undefined) {
+            for (const k of Object.keys(info)) {
+                if (k.endsWith('.context_length') && typeof info[k] === 'number') { ctx = info[k]; break; }
+            }
+        }
+        if (typeof ctx === 'number' && ctx > 0) {
+            MODEL_CTX_CACHE.set(model, ctx);
+            log(`[ctx] ${model} native context length = ${ctx} (from Ollama /api/show)`);
+            return ctx;
+        }
+        return undefined;
+    } catch { return undefined; }
+}
+
+// Per-role num_ctx. The dashboard dropdown sets an override per agent role
+// (orchestrator/atlas/tools/mercury); the matching env var is the source of
+// truth. The override is CAPPED at the model's individual cap (fetched from
+// Ollama), so a dropdown value above the model's real window is clamped down
+// rather than being sent to a backend that would reject it. When a role has
+// NO override set we send NO num_ctx — the backend uses the model's own
+// native window (the one that actually works for that model, including image
+// requests). We never shove a hardcoded ctx at the model: the old
+// 262144/32768/30720/51200/16384 fallbacks fought the model's real window
+// (cloud backends 500'd on 262144 + image). Call fetchModelCtx once before the
+// loop so the cap cache is warm; getNumCtx reads it synchronously.
+function getNumCtx(model: string): number | undefined {
+    const nativeMax = MODEL_CTX_CACHE.get(model); // undefined until fetchModelCtx populates it
+    const cap = (v: number): number => (nativeMax && v > nativeMax) ? nativeMax : v;
     if (model === ORCHESTRATOR_MODEL) {
         const override = process.env.ORCHESTRATOR_NUM_CTX ? parseInt(process.env.ORCHESTRATOR_NUM_CTX, 10) : 0;
-        // An explicit dashboard override always wins — even below the default
-        // floor — so a small model (e.g. granite4.1:8b) can be pinned to 16k to
-        // keep its KV cache in VRAM instead of spilling to CPU at 32k.
-        if (override > 0) return override;
-        if (!model.endsWith(':cloud')) return 32768;
-        // cloud orchestrator with no override: fall through to the cloud default.
+        // An explicit dashboard override wins over the native cap only when it
+        // is SMALLER — so a small model (e.g. granite4.1:8b) can be pinned to
+        // 16k to keep its KV cache in VRAM. An override above the cap is clamped.
+        if (override > 0) return cap(override);
     }
     if (model === ATLAS_MODEL) {
         const override = process.env.ATLAS_NUM_CTX ? parseInt(process.env.ATLAS_NUM_CTX, 10) : 0;
-        if (override > 0) return override;
+        if (override > 0) return cap(override);
     }
     if (model === TOOL_MODEL) {
         const toolsOverride = process.env.TOOLS_NUM_CTX ? parseInt(process.env.TOOLS_NUM_CTX, 10) : 0;
         const subagentOverride = process.env.SUBAGENT_NUM_CTX ? parseInt(process.env.SUBAGENT_NUM_CTX, 10) : 0;
         const override = toolsOverride || subagentOverride;
-        if (override > 0) return override;
+        if (override > 0) return cap(override);
     }
     // Mercury (conversation compaction) — its own ctx override from the
     // dashboard. Gated on sessionId so it only applies to the mercury summary
     // run, not orchestrator/atlas runs that happen to share the same model.
     if ((globalThis as any)._sessionId === 'mercury') {
         const mercuryOverride = process.env.MERCURY_NUM_CTX ? parseInt(process.env.MERCURY_NUM_CTX, 10) : 0;
-        if (mercuryOverride > 0) return mercuryOverride;
+        if (mercuryOverride > 0) return cap(mercuryOverride);
     }
-    if (model.endsWith(':cloud')) return 262144;
-    if (model.startsWith('granite')) return 30720;
-    if (model.startsWith('gemma')) return 51200;
-    return 16384;
+    return undefined; // no override → send no num_ctx; backend uses the model's own native window
 }
 
 // Tell Ollama to unload a model immediately (free VRAM for the next agent's model).
@@ -1332,10 +1384,11 @@ async function runSubAgent(
     ];
     let lastContent = '';
     const toolsRun: string[] = [];  // tools the sub-agent actually executed (fallback summary if it goes silent)
-    // Set once we swap to an installed model after a 404 (missing model) — at most one swap per delegation.
-    let triedModelFallback = false;
 
     log(`[${agentName}] Starting sub-agent: model=${model}, tools=${tools.length}, maxIter=${maxIterations > 0 ? maxIterations : '∞ (ceiling ' + HARD_CEILING + ')'}, task="${task.slice(0, 80)}"`);
+
+    // Warm the native-ctx cache from Ollama so getNumCtx can cap/serve it below.
+    await fetchModelCtx(OLLAMA_URL, model);
 
     // Context-overflow tripwire: if the initial payload (system prompt + tool
     // schemas + task) already exceeds the model's num_ctx, ollama context-shifts
@@ -1346,7 +1399,7 @@ async function runSubAgent(
         const payloadChars = JSON.stringify(messages).length + JSON.stringify(tools).length;
         const estTokens = Math.round(payloadChars / 3.5);
         const ctx = getNumCtx(model);
-        if (estTokens > ctx) {
+        if (ctx && estTokens > ctx) {
             log(`[${agentName}] WARNING: initial prompt ~${estTokens} tokens but num_ctx=${ctx} (model=${model}) — the system prompt and tool schemas will be truncated and the agent will misbehave. Raise the sub-agent ctx in dashboard settings.`);
         }
     }
@@ -1373,61 +1426,16 @@ async function runSubAgent(
             // Trim history to fit context budget before each chat call.
             const trimmed = trimMessagesToBudget(messages, SUBAGENT_MSG_BUDGET_CHARS);
             if (trimmed.length !== messages.length) messages.length = 0, messages.push(...trimmed);
-            // Retry loop for cloud model transient failures / silent drops
-            let chatResult: any = null;
-            const MAX_CHAT_RETRIES = 3;
-            for (let attempt = 0; attempt < MAX_CHAT_RETRIES; attempt++) {
-                try {
-                    chatResult = await provider.chat({
-                        model,
-                        messages,
-                        tools,
-                        options: { num_predict: 65536, temperature: 1, num_ctx: getNumCtx(model) },
-                        keep_alive: 300,
-                        // Only send think:true for models that support it — Ollama returns
-                        // an error for non-thinking models (e.g. granite) with think:true.
-                        think: modelRequiresThink(model),
-                    });
-                    break; // success
-                } catch (chatErr: any) {
-                    const msg = chatErr.message || String(chatErr);
-                    // Missing model: Ollama answers /api/chat with 404 when the requested
-                    // model isn't installed (e.g. SUBAGENT_MODEL unset → fallback model that
-                    // was never pulled). Instead of failing the whole delegation with a bare
-                    // "404 Not Found", verify against /api/tags and retry ONCE with a model
-                    // that actually exists (orchestrator's model first — it's known-good).
-                    if (msg.includes('404') && !triedModelFallback) {
-                        triedModelFallback = true;
-                        const missing = model;
-                        let installed: string[] = [];
-                        try { installed = (await provider.listModels()).map((m: any) => m.name); } catch {}
-                        if (!installed.includes(missing)) {
-                            const fallback = [ORCHESTRATOR_MODEL, ATLAS_MODEL, installed[0]]
-                                .find(m => m && m !== missing && installed.includes(m));
-                            if (fallback) {
-                                log(`[${agentName}] Model "${missing}" is not installed in Ollama (404) — falling back to "${fallback}" for this task. Fix: ollama pull ${missing}, or set the sub-agent model in dashboard settings.`);
-                                model = fallback;
-                                attempt--; // give the fallback model a fresh set of retries on this attempt slot
-                                continue;
-                            }
-                            throw new Error(`Model "${missing}" is not installed in Ollama (chat returned 404) and no installed fallback model was found. Run \`ollama pull ${missing}\` or change the sub-agent model in dashboard settings.`);
-                        }
-                        // Model exists yet chat 404'd — wrong URL/path, not a model issue; fall through.
-                    }
-                    const retryable = msg.includes('abort') || msg.includes('timeout')
-                        || msg.includes('ECONNRESET') || msg.includes('ECONNREFUSED')
-                        || msg.includes('500') || msg.includes('503') || msg.includes('502')
-                        || msg.includes('overloaded') || msg.includes('Internal Server Error');
-                    if (attempt < MAX_CHAT_RETRIES - 1 && retryable) {
-                        const delay = (attempt + 1) * 15_000;
-                        log(`[${agentName}] Chat error: ${msg.slice(0, 120)} — retry ${attempt + 1}/${MAX_CHAT_RETRIES - 1} in ${delay / 1000}s`);
-                        await new Promise(r => setTimeout(r, delay));
-                        continue;
-                    }
-                    throw chatErr; // non-retryable or exhausted
-                }
-            }
-            if (!chatResult) throw new Error('Chat returned null after retries');
+            const chatResult = await provider.chat({
+                model,
+                messages,
+                tools,
+                options: { num_predict: 65536, temperature: 1, num_ctx: getNumCtx(model) },
+                keep_alive: 300,
+                // Only send think:true for models that support it — Ollama returns
+                // an error for non-thinking models (e.g. granite) with think:true.
+                think: modelRequiresThink(model),
+            });
 
             const data = { message: chatResult.message, usage: chatResult.usage } as any;
 
@@ -1551,6 +1559,7 @@ interface ContainerInput {
     councilSkepticModel?: string;
     councilPragmatistModel?: string;
     councilSynthesistModel?: string;
+    heimdallModel?: string;
     userId?: string;
     userKeyId?: string;
     verbose?: boolean;
@@ -1647,10 +1656,6 @@ async function runNativeOllama(input: ContainerInput) {
         // to the orchestrator so it can take a screenshot / webcam frame / read a
         // host image and inspect it directly instead of delegating to a sub-agent.
         'desktop_screenshot', 'webcam_capture', 'read_image',
-        // Orchestrator → Heimdall direct (so the orchestrator talks to the
-        // security agent, not via Atlas). tier:'public' + 'chat' toolset keeps
-        // it orchestrator-only; ALWAYS_INCLUDED so the ranker doesn't hide it.
-        'tell_heimdall',
     ]);
     const DYNAMIC_TOOL_TOP_K = 12;
     let activeToolDefs = fullToolDefs;
@@ -1768,6 +1773,7 @@ Warden is a multi-agent system running on the user's own machine. You are the co
 - **byte** — projects, deliverables, blockers, financials, work tasks.
 - **artemis** — audit / second opinion on the conversation. Runs in the background like atlas.
 - **council** — three seats (Skeptic, Pragmatist, Synthesist) deliberate in parallel on a costly decision until they agree.
+- **heimdall** — the security camera agent. SECURITY ALERT messages from the detector are piped to Heimdall automatically in code (you never see them). Delegate to heimdall only if the user explicitly asks you to do something with the security system (check a camera, arm/disarm, review a frame). Heimdall runs in the background; you get a job id and the result lands in your inbox.
 
 Each specialist's model is picked per-role in the dashboard — local (Ollama) or cloud — and the orchestrator (you) has its own model too. You don't choose or see which model a specialist runs on; you just delegate. A specialist's result is its own work, in its own words — relay what matters, don't re-do it.
 
@@ -1943,6 +1949,7 @@ Voice-first. Plain spoken sentences. No markdown — no asterisks, bullets, back
     COUNCIL_MODEL_SKEPTIC = (input.councilSkepticModel || '').replace(/^local:/, '');
     COUNCIL_MODEL_PRAGMATIST = (input.councilPragmatistModel || '').replace(/^local:/, '');
     COUNCIL_MODEL_SYNTHESIST = (input.councilSynthesistModel || '').replace(/^local:/, '');
+    HEIMDALL_MODEL = (input.heimdallModel || '').replace(/^local:/, '');
     TOOL_MODEL = process.env.SUBAGENT_MODEL || process.env.OLLAMA_CHAT_MODEL || ORCHESTRATOR_MODEL || '';
     const toolContext = { chatJid: input.chatJid, groupFolder: input.groupFolder, isMain: input.isMain, userId: process.env.WARDEN_USER_ID || '' };
 
@@ -1983,6 +1990,11 @@ Voice-first. Plain spoken sentences. No markdown — no asterisks, bullets, back
         // local `model` stays pinned to the first turn's value and dashboard model
         // changes never reach the actual LLM call (the "settings didn't apply" bug).
         model = ORCHESTRATOR_MODEL;
+        // Warm/refresh the native-ctx cache for this turn's model so getNumCtx can
+        // cap the dashboard override at the model's real window (and serve it as
+        // the default when no override is set). Cheap: cached per model after the
+        // first turn; a dashboard model change just fetches the new model once.
+        await fetchModelCtx(OLLAMA_URL, model);
         // No per-turn flow-control reminder — the model replies when done and emits a
         // tool call when it needs one. (Completion guidance lives in the system prompt.)
         // The parent composes EVERY turn's prompt with <mercury_summary>/<mercury_context>/
@@ -2096,6 +2108,11 @@ Voice-first. Plain spoken sentences. No markdown — no asterisks, bullets, back
                 // 'max' forces thinking on every iteration; 'false'/'off' disables it.
                 if (showThinking) {
                     requestBody.think = (thinkingMode === 'max') || toolIteration === 1 || modelRequiresThink(model);
+                } else {
+                    // Explicitly disable thinking — otherwise thinking-capable models
+                    // (granite4/gemma4) emit a `thinking` field with empty `content`,
+                    // producing "Empty response." on every turn.
+                    requestBody.think = false;
                 }
                 // AbortController lets the silence timer hard-abort a hung fetch —
                 // reader.cancel() alone doesn't interrupt a low-level TCP read on
@@ -2731,6 +2748,32 @@ Voice-first. Plain spoken sentences. No markdown — no asterisks, bullets, back
             log(`WARNING: degenerate word-mash output suppressed (${outputContent.length} chars, model=${ORCHESTRATOR_MODEL}). First 200 chars: ${outputContent.slice(0, 200)}`);
             outputContent = 'Something went wrong generating my answer on this turn — the model produced garbled output. Please send that request again.';
         }
+        // Placeholder/no-op detector: the model sometimes emits markers like
+        // "<empty></empty>" or "Empty response." when told to reply with nothing.
+        // On monitor ticks, replace that with a simple, human status note so the
+        // supervisor actually says something instead of looking broken.
+        const isPlaceholderOutput = (text: string): boolean => {
+            const t = (text || '').trim().toLowerCase().replace(/\s+/g, ' ');
+            if (!t) return true;
+            const placeholders = [
+                '<empty></empty>',
+                'empty response.',
+                'empty response requested by system for on-track jobs.',
+                'no response.',
+                'nothing to report.',
+                '---',
+                '...',
+                '–',
+            ];
+            return placeholders.includes(t) || /^[.\-_\s–]+$/.test(t);
+        };
+        if (turnWasMonitorTick && isPlaceholderOutput(outputContent)) {
+            const running = [...atlasBackgroundJobs.values()].filter(j => j.status === 'running');
+            outputContent = running.length > 0
+                ? `Supervisor check — everything is looking good (${running.length} job${running.length > 1 ? 's' : ''} running).`
+                : '';
+            if (outputContent) log(`[orchestrator-monitor] placeholder replaced with default status note`);
+        }
         log(`About to writeOutput. outputContent: "${(outputContent || '').slice(0, 100)}"`)
         if (!errorOutputWritten) {
             writeOutput({ status: 'success', result: outputContent || null });
@@ -2983,7 +3026,7 @@ Voice-first. Plain spoken sentences. No markdown — no asterisks, bullets, back
                     `2. ON TRACK? If a job is making real progress toward the user's request — reading files, trying approaches, recovering from errors, iterating on a search is PROGRESS — leave it alone. Reply with nothing, OR give the user a one-line progress report. Do not interfere with work that is going well, and do not stop a job just because a path looks strange or a step seems roundabout.\n` +
                     `3. VEERING / WRONG / STALLED? If a job is going in the wrong direction, doing the wrong thing, repeating the same call with no change, or making no tool calls for a long stretch — intervene: call \`stop_agent\` for that job and re-delegate to the right agent with a corrected task that spells out what was wrong and what you actually want. Do not let work veer off just because it is still running.\n` +
                     `4. CHAIN NEXT STEP? If a job has finished and the user's request has a next step that has not been taken (e.g. a plan exists but the council has not deliberated, a verdict is in but the work has not revised), take that next step YOURSELF now — do not wait for the user to say "continue".\n` +
-                    `When there is nothing to report or do, reply with a completely EMPTY response — no text at all, no placeholders like "---" or "..." or "ok". Any reply that contains actual words is delivered to the user as a short message, so only speak when you have a real update, a needed course-correction, or a next step to announce.`;
+                    `When there is nothing to report or do, reply with a completely EMPTY response — no text at all, no placeholders like "<empty></empty>", "Empty response.", "---", "...", "ok", or any other token. Placeholders look like a broken supervisor to the user. Any reply that contains actual words is delivered to the user as a short message, so only speak when you have a real update, a needed course-correction, or a next step to announce.`;
                 log(`[orchestrator-monitor] tick #${tickNum} fired with ${stillRunning.length} running job(s)`);
                 turnWasMonitorTick = true;
                 nextInput = synthetic;
@@ -3138,7 +3181,7 @@ async function executeXmlTool(toolName: string, args: any, context: any, modifie
     // delegate task, bounce it back instead of dispatching (and before the
     // task is spoken to the user). The task is English intent, not a command
     // line — see looksLikeCommandPrescription above.
-    const DELEGATE_TOOL_NAMES = new Set(['atlas', 'atlas_background', 'iris', 'dexter', 'byte', 'artemis', 'council']);
+    const DELEGATE_TOOL_NAMES = new Set(['atlas', 'atlas_background', 'iris', 'dexter', 'byte', 'artemis', 'council', 'heimdall']);
     if (DELEGATE_TOOL_NAMES.has(toolName) && args.task && looksLikeCommandPrescription(String(args.task))) {
         log(`[guard] blocked over-prompted ${toolName} task (contains shell command): ${String(args.task).slice(0, 120)}`);
         return `STOP — you put a shell command in the task. That is over-prompting and the user has told you repeatedly to stop. A delegate task is plain-English INTENT for the specialist, not a command line. Do NOT include \`grep\`, \`curl\`, \`ollama list\`, \`systemctl\`, \`npx\`, \`npm\`, or any other shell command — those are the specialist's calls to make, not yours. State the GOAL and the facts (paths, URLs, names, what's wrong) in normal English and let ${toolName} decide how to investigate. Re-call ${toolName} now with intent only.`;
@@ -3147,8 +3190,11 @@ async function executeXmlTool(toolName: string, args: any, context: any, modifie
     // Mid-turn, restate to the user what's about to happen (their intent, in
     // clean words) while the sub-agent runs in the background. The engineered
     // task string already is that restatement — speak it directly, no label.
+    // Skip the restatement for heimdall: its task is the verbatim SECURITY ALERT
+    // text (already in chat), so echoing it would double-post the alert and
+    // re-trigger the loop. Heimdall runs silently in the background.
     const delegateDef = SUBAGENT_BY_DELEGATE.get(toolName);
-    if (delegateDef && args.task) {
+    if (delegateDef && args.task && toolName !== 'heimdall') {
         try { writeCallback('send_message', { text: `${args.task as string}` }); } catch { /* best-effort */ }
     }
 
@@ -3384,6 +3430,69 @@ async function executeXmlTool(toolName: string, args: any, context: any, modifie
         } else {
             atlasDirect = { active: true, messages: [] };
             result = `Direct Atlas mode is on. Tell the user, in one short sentence, that they're now talking to Atlas directly — they can describe what they need and Atlas will ask questions to get it right, then say "go" to start or "back to Warden" to exit. Then end your turn immediately and do nothing else.`;
+        }
+    } else if (toolName === 'heimdall') {
+        // Heimdall — the background security agent. Spawn it as a background
+        // job (same pattern as atlas) so the orchestrator gets a job id back
+        // immediately and the security review result lands in the inbox. This
+        // mirrors the host-side tell_heimdall path and the auto-trigger routing
+        // in the parent process, both of which use runSubAgentBackground. Without
+        // this branch the call fell through to registry.dispatch('heimdall') →
+        // "Error: Unknown tool heimdall" because heimdall is a delegate, not a
+        // registered registry tool.
+        const task = args.task as string;
+        const urgent = args.urgent === true;
+        if (!task) {
+            result = 'Error: task is required';
+        } else {
+            const def = SUBAGENT_BY_DELEGATE.get('heimdall')!;
+            const jobShortId = Math.random().toString(36).slice(2, 6);
+            const jobId = `heimdall-${jobShortId}`;
+            // Inject the current local time so Heimdall can reference events by
+            // time/date (its system prompt expects this at the top of the task).
+            const tz = process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone;
+            const localNow = new Date().toLocaleString('sv-SE', { timeZone: tz }).replace(' ', 'T');
+            const heimdallTask = `Current local time is ${localNow} (timezone ${tz}).\n\n${task}`;
+            const tools = SUBAGENT_TOOL_DEFS.get('heimdall') || [];
+            // Heimdall runs on its own dashboard model (heimdall:model) — typically
+            // a local vision model, since cloud models flake (500) on Ollama's
+            // base64 alert-frame images. No fallback: the dropdown can't be blank,
+            // so HEIMDALL_MODEL is always set.
+            const model = HEIMDALL_MODEL || undefined;
+            writeStatus({ phase: 'heimdall', label: `Heimdall ${jobShortId}: ${task.slice(0, 50)}...`, jobs: atlasBackgroundJobs.size + 1, ts: Date.now() });
+            const abortFlag = { aborted: false };
+            const jobRecord: BackgroundJob = {
+                promise: null as any, startedAt: Date.now(), agent: 'heimdall', task, shortId: jobShortId,
+                toolCallCount: 0, lastAction: 'starting', lastActionAt: Date.now(), abortFlag,
+                status: 'running', activityLog: [],
+            };
+            const job = runSubAgent('heimdall', model, def.systemPrompt, tools, heimdallTask, context, def.maxIterations, abortFlag, (tName, argsSummary, resultPreview) => {
+                jobRecord.toolCallCount++;
+                jobRecord.lastAction = `${tName}(${argsSummary})`;
+                jobRecord.lastActionAt = Date.now();
+                jobRecord.activityLog.push({ t: Date.now(), tool: tName, args: argsSummary, result: resultPreview });
+                if (jobRecord.activityLog.length > 200) jobRecord.activityLog.shift();
+                emitAtlasJobsStatus();
+            })
+                .then(saResult => {
+                    writeStatus({ phase: 'heimdall', label: `Heimdall ${jobShortId} complete`, ts: Date.now() });
+                    if (jobRecord.status === 'running') jobRecord.status = 'done';
+                    inbox.push({ jobId, agent: 'heimdall', task, urgent, status: jobRecord.abortFlag.aborted ? 'aborted' : 'done', fullResult: saResult.content || 'Heimdall completed the security review (no text output).', activityLog: jobRecord.activityLog });
+                })
+                .catch(err => {
+                    if (jobRecord.status === 'running') jobRecord.status = 'errored';
+                    inbox.push({ jobId, agent: 'heimdall', task, urgent, status: 'errored', fullResult: `Error: ${err?.message ?? err}` });
+                })
+                .finally(() => {
+                    if (jobRecord.status === 'running') jobRecord.status = 'done';
+                    const remaining = [...atlasBackgroundJobs.values()].filter(j => j.status === 'running').length;
+                    writeStatus({ phase: remaining > 0 ? 'heimdall' : 'idle', label: remaining > 0 ? `${remaining} job(s) still running` : `Heimdall ${jobShortId} complete`, jobs: remaining, ts: Date.now() });
+                    setTimeout(() => { atlasBackgroundJobs.delete(jobId); }, 60000).unref?.();
+                });
+            jobRecord.promise = job;
+            atlasBackgroundJobs.set(jobId, jobRecord);
+            emitAtlasJobsStatus();
+            result = `Heimdall ${jobShortId} started${urgent ? ' (urgent — its result will interrupt you when ready)' : ''} — the security review result will arrive in your inbox. (job id: ${jobId})`;
         }
     } else if (toolName === 'byte' || toolName === 'dexter' || toolName === 'iris') {
         const def = SUBAGENT_BY_DELEGATE.get(toolName)!;
@@ -3631,7 +3740,17 @@ async function main() {
                 isMain: containerInput.isMain ?? true,
                 userId: process.env.WARDEN_USER_ID || '',
             };
-            const model = containerInput.model || process.env.HEIMDALL_MODEL || ORCHESTRATOR_MODEL;
+            const model = containerInput.model || HEIMDALL_MODEL || undefined;
+            // Heimdall runs on its own dashboard model (heimdall:model), passed by
+            // containerInput.model). Mirror it into ORCHESTRATOR_MODEL so Heimdall
+            // resolves num_ctx — and any other orchestrator-scoped setting —
+            // exactly as the orchestrator does: getNumCtx(model) hits the
+            // model === ORCHESTRATOR_MODEL branch and reads process.env.ORCHESTRATOR_NUM_CTX
+            // (the dashboard's local:orchestrator_ctx, inherited via env). Without
+            // this, Heimdall skipped every override and fell to the hardcoded cloud
+            // ctx, which the cloud backend rejected (gemma4:31b-cloud → 500). It
+            // also makes unloadModel skip evicting a model the orchestrator shares.
+            if (model) ORCHESTRATOR_MODEL = model;
             log(`[heimdall] starting background security agent: model=${model || '(none)'}, tools=${tools.length}, task="${(containerInput.prompt || '').slice(0, 80)}"`);
             const sa = await runSubAgent('heimdall', model, def.systemPrompt, tools, containerInput.prompt || '', ctx, def.maxIterations);
             writeOutput({ status: 'success', result: sa.content || 'Heimdall: done (silent).', error: null });

@@ -34,18 +34,18 @@ export const TOOLSETS: Record<string, ToolsetDef> = {
     todos:     { name: 'todos',     tools: ['list_todos','create_todo','complete_todo','delete_todo'], tier: 'private' },
     alarms:    { name: 'alarms',    tools: ['create_alarm','list_alarms','update_alarm','delete_alarm'], tier: 'private' },
     sms:       { name: 'sms',       tools: ['send_sms','read_sms'], tier: 'private' },
-    chat:      { name: 'chat',      tools: ['get_chat_history','ping_user','attach_file','set_user_email','tell_heimdall'], tier: 'both' },
+    chat:      { name: 'chat',      tools: ['get_chat_history','ping_user','attach_file','set_user_email'], tier: 'both' },
     admin:     { name: 'admin',     tools: ['register_group','list_api_keys','api_request'], tier: 'public' },
     documents: { name: 'documents', tools: ['generate_pdf','convert_file'], tier: 'public' },
     context:   { name: 'context',   tools: ['clear_context'], tier: 'public' },
     fabric:    { name: 'fabric',    tools: ['fabric_pattern'], tier: 'both' },
-    agent:     { name: 'agent',     tools: ['byte','dexter','atlas','artemis','iris'], tier: 'public' },
+    agent:     { name: 'agent',     tools: ['byte','dexter','atlas','artemis','iris','heimdall'], tier: 'public' },
 
     // Heimdall — the background security agent. All its security tools listed
     // explicitly here so the sub-agent definitely gets them (close_security_alert
     // is registered with toolset 'chat' but isn't in the chat toolset's list).
     // Read/Write/Edit come via 'file' (tier both → BOTH_TOOL_DEFS).
-    security:     { name: 'security',     tools: ['webcam_capture','send_message','alert_security','open_security_alert','dismiss_security_flag','save_known_person','security_log'], tier: 'public' },
+    security:     { name: 'security',     tools: ['webcam_capture','send_message','alert_security','open_security_alert','dismiss_security_flag','arm_security','disarm_security','security_log'], tier: 'public' },
     'security-core': { name: 'security-core', includes: ['security'] },
 
     'byte-core':     { name: 'byte-core',     includes: ['projects','worktasks','deliverables','blockers','tracking','admin'] },

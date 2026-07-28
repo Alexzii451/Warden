@@ -313,6 +313,7 @@ const agentState = {
   insideCallback: false,
   callbackLines: [] as string[],
   turnTimeout: null as ReturnType<typeof setTimeout> | null,
+  sentMessageCallback: false,
 };
 
 // Live verbose-status label emitted by the agent-runner child via
@@ -395,6 +396,7 @@ function resetTurnState(callbacks: CallbackMap, resolve: (out: AgentOutput) => v
   agentState.insideOutput = false;
   agentState.insideCallback = false;
   agentState.callbackLines = [];
+  agentState.sentMessageCallback = false;
   agentState.turnTimeout = setTimeout(() => {
     const r = agentState.resolve;
     if (!r) return;
@@ -440,6 +442,9 @@ async function handleCallback(raw: string) {
     const result = await handler(parsed.args);
     if (result && (result as any).ok === false) {
       logger.warn({ tool, error: (result as any).error }, 'agent-spawn: callback handler returned error');
+    }
+    if (tool === 'send_message' && result && (result as any).ok === true) {
+      agentState.sentMessageCallback = true;
     }
     writeCallbackResponse({ id, ...result });
   } catch (err: any) {
@@ -515,7 +520,8 @@ function onPersistentStdoutData(chunk: Buffer) {
           r({ text: '', exitCode: 0, durationMs: Date.now() - agentState.startedAt, userStopped: true });
           return;
         }
-        r({ text: agentState.captured, exitCode: 0, durationMs: Date.now() - agentState.startedAt });
+        const outText = agentState.sentMessageCallback ? '' : agentState.captured;
+        r({ text: outText, exitCode: 0, durationMs: Date.now() - agentState.startedAt });
       }
       // Keep child alive for next turn — do NOT end stdin or kill
       continue;
@@ -561,7 +567,7 @@ function setupPersistentChild(child: ChildProcess, startedAt: number) {
         r({ text: '', exitCode: 0, durationMs: Date.now() - startedAt, userStopped: true });
         return;
       }
-      r({ text: agentState.captured, exitCode, durationMs: Date.now() - startedAt,
+      r({ text: agentState.sentMessageCallback ? '' : agentState.captured, exitCode, durationMs: Date.now() - startedAt,
         error: exitCode !== 0 ? `agent exited with code ${exitCode}${signal ? ` (signal ${signal})` : ''}; stderr: ${agentState.stderr.slice(-1500)}` : undefined });
     }
   });
@@ -578,8 +584,11 @@ function setupPersistentChild(child: ChildProcess, startedAt: number) {
 /**
  * Kill the currently-running agent child process, if any.
  * Returns true if a process was killed, false if none was running.
+ *
+ * Pass hard=true for an immediate SIGKILL (the "stop" panic word) instead of
+ * the default SIGTERM → SIGKILL-after-2s grace.
  */
-export function killCurrentAgent(): boolean {
+export function killCurrentAgent(hard = false): boolean {
   const proc = persistentChild || currentAgent;
   if (!proc || proc.killed) {
     persistentChild = null;
@@ -588,12 +597,14 @@ export function killCurrentAgent(): boolean {
   }
   try {
     userStoppedAgent = true;
-    proc.kill('SIGTERM');
-    setTimeout(() => {
-      if (proc.exitCode === null && proc.signalCode === null) {
-        try { proc.kill('SIGKILL'); } catch { /* dead */ }
-      }
-    }, 2000).unref();
+    proc.kill(hard ? 'SIGKILL' : 'SIGTERM');
+    if (!hard) {
+      setTimeout(() => {
+        if (proc.exitCode === null && proc.signalCode === null) {
+          try { proc.kill('SIGKILL'); } catch { /* dead */ }
+        }
+      }, 2000).unref();
+    }
     return true;
   } catch {
     persistentChild = null;
@@ -633,6 +644,7 @@ export function runAgent(input: AgentRunInput): Promise<AgentOutput> {
             councilSkepticModel: input.councilSkepticModel,
             councilPragmatistModel: input.councilPragmatistModel,
             councilSynthesistModel: input.councilSynthesistModel,
+            heimdallModel: input.heimdallModel,
             subagentModel: process.env.SUBAGENT_MODEL || '',
             orchestratorCtx: process.env.ORCHESTRATOR_NUM_CTX || '',
             subagentCtx: process.env.SUBAGENT_NUM_CTX || '',
@@ -669,6 +681,7 @@ export function runAgent(input: AgentRunInput): Promise<AgentOutput> {
       councilSkepticModel: input.councilSkepticModel,
       councilPragmatistModel: input.councilPragmatistModel,
       councilSynthesistModel: input.councilSynthesistModel,
+      heimdallModel: input.heimdallModel,
       sessionId: input.sessionId,
       workspaceRoot: input.workspaceRoot,
       history: input.history,

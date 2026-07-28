@@ -43,7 +43,6 @@ from core.capture import CaptureSink, annotate
 from core.warden import WardenClient
 from core.voice_launcher import VoiceLauncher
 from core.server import FrameServer
-from core import known
 
 log = logging.getLogger("security")
 
@@ -52,6 +51,7 @@ LIGHT_GREEN = (0, 200, 0)     # idle / clear
 LIGHT_AMBER = (0, 180, 255)   # motion only, no rule fire
 LIGHT_RED = (0, 0, 230)       # alert sent to Warden
 LIGHT_BLUE = (230, 130, 0)    # (reserved for "Warden reviewing")
+LIGHT_GREY = (120, 120, 120)  # disarmed
 
 _running = True
 
@@ -79,11 +79,32 @@ def _stand_down_rect(frame: np.ndarray):
     return (x1, y1, x1 + bw, y1 + bh)
 
 
+def _arm_btn_rect(frame: np.ndarray):
+    """The ARM/DISARM toggle button, top-right of the frame (just under the top bar)."""
+    h, w = frame.shape[:2]
+    bw, bh = 140, 32
+    x1 = w - bw - 14
+    y1 = 44
+    return (x1, y1, x1 + bw, y1 + bh)
+
+
+def _draw_btn(out, rect, fill, label):
+    """Draw a filled button with a centered text label."""
+    x1, y1, x2, y2 = rect
+    cv2.rectangle(out, (x1, y1), (x2, y2), fill, -1)
+    cv2.rectangle(out, (x1, y1), (x2, y2), (255, 255, 255), 1)
+    (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
+    cv2.putText(out, label,
+                (x1 + (x2 - x1 - tw) // 2, y1 + (y2 - y1 + th) // 2),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
+
+
 def _overlay(frame: np.ndarray, light_color, status: str, fps: float,
-             alert_open: bool = False) -> np.ndarray:
+             alert_open: bool = False, armed: bool = True) -> np.ndarray:
     """Draw the alert light (top-left circle) + a status line onto the frame.
-    When an alert is open, also draw the red STAND DOWN button the security
-    guard presses to review the image + close the alert."""
+    Always draws the ARM/DISARM toggle button (top-right). When an alert is
+    open, also draws the red STAND DOWN button the guard presses to review
+    the image + close the alert."""
     out = frame
     cv2.circle(out, (28, 28), 14, light_color, -1)
     cv2.circle(out, (28, 28), 14, (255, 255, 255), 1)
@@ -93,12 +114,13 @@ def _overlay(frame: np.ndarray, light_color, status: str, fps: float,
     cv2.putText(out, f"{fps:4.1f} fps",
                 (out.shape[1] - 90, out.shape[0] - 12),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1, cv2.LINE_AA)
+    # ARM/DISARM toggle — red when armed (click to disarm), grey when disarmed (click to arm).
+    _draw_btn(out, _arm_btn_rect(out),
+              (0, 0, 220) if armed else (90, 90, 90),
+              "DISARM" if armed else "ARM")
     if alert_open:
         x1, y1, x2, y2 = _stand_down_rect(out)
-        cv2.rectangle(out, (x1, y1), (x2, y2), (0, 0, 220), -1)  # red button
-        cv2.rectangle(out, (x1, y1), (x2, y2), (255, 255, 255), 1)
-        cv2.putText(out, "STAND DOWN — close alert",
-                    (x1 + 18, y1 + 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
+        _draw_btn(out, (x1, y1, x2, y2), (0, 0, 220), "STAND DOWN — close alert")
     return out
 
 
@@ -129,6 +151,8 @@ def main(argv: list[str] | None = None) -> int:
     if not cap.isOpened():
         log.error("could not open webcam index %s", cam_cfg["index"])
         return 2
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, cam_cfg["width"])
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, cam_cfg["height"])
 
@@ -226,6 +250,30 @@ def main(argv: list[str] | None = None) -> int:
     frame_server.on_alert_close = rearm
     frame_server.on_alert_open = open_alert
 
+    # ── Arm/disarm (2-way): the guard arms/disarms from chat via Warden ───────
+    # Disarmed = the detector runs + shows the feed, but does NOT flag to
+    # Warden/Heimdall. Armed = Heimdall has priority — flagging/security alerts.
+    armed = [False]  # default DISARMED; box so the callbacks can mutate it
+
+    def do_arm():
+        armed[0] = True
+        frame_server.set_armed(True)
+        log.info("system ARMED (chat command) — flagging enabled")
+
+    def do_disarm():
+        armed[0] = False
+        frame_server.set_armed(False)
+        # Drop any in-flight review so a stale Heimdall verdict can't open an
+        # alert on a disarmed system.
+        nonlocal phase, alert_open_since
+        phase = "ARMED"
+        alert_open_since = 0.0
+        log.info("system DISARMED (chat command) — flagging paused")
+
+    frame_server.on_arm = do_arm
+    frame_server.on_disarm = do_disarm
+    frame_server.set_armed(armed[0])  # sync server to the default
+
     interval = 1.0 / max(1, cam_cfg["fps"])
     last_infer = 0.0
     last_frame_time = 0.0
@@ -250,11 +298,25 @@ def main(argv: list[str] | None = None) -> int:
         _by1 = cam_cfg["height"] - _bh - 14
         _btn_rect = (_bx1, _by1, _bx1 + _bw, _by1 + _bh)
 
+        # ARM/DISARM toggle button hit-rect (matches _arm_btn_rect for this frame size).
+        _abw, _abh = 140, 32
+        _abx1 = cam_cfg["width"] - _abw - 14
+        _aby1 = 44
+        _arm_rect = (_abx1, _aby1, _abx1 + _abw, _aby1 + _abh)
+
         def on_mouse(event, x, y, _flags, _param):
-            # Pressing the red STAND DOWN button closes the open alert (re-arms
-            # the detector) and opens a review window with the alert image.
             if event != cv2.EVENT_LBUTTONDOWN:
                 return
+            # ARM/DISARM toggle — always available, independent of the alert state.
+            ax1, ay1, ax2, ay2 = _arm_rect
+            if ax1 <= x <= ax2 and ay1 <= y <= ay2:
+                if armed[0]:
+                    do_disarm()
+                else:
+                    do_arm()
+                return
+            # Pressing the red STAND DOWN button closes the open alert (re-arms
+            # the detector) and opens a review window with the alert image.
             if phase != "ALERTED" or last_alert_frame is None:
                 return
             rx1, ry1, rx2, ry2 = _btn_rect
@@ -323,7 +385,9 @@ def main(argv: list[str] | None = None) -> int:
                 rearm()
 
             # Light/status by phase.
-            if phase == "ALERTED":
+            if not armed[0]:
+                light, state = LIGHT_GREY, "DISARMED"
+            elif phase == "ALERTED":
                 light, state = LIGHT_RED, "ALERT — press STAND DOWN"
             elif phase == "REVIEWING":
                 light, state = LIGHT_AMBER, "REVIEWING — Heimdall assessing"
@@ -337,29 +401,8 @@ def main(argv: list[str] | None = None) -> int:
             # Flag ONE detection (person or covered camera) for Heimdall review
             # while ARMED and past the post-close suppress window. This does NOT
             # spawn the alert — Heimdall's abnormal verdict does (→ /alert/open).
-            #
-            # Known-person skip: when a person is detected (kept non-empty) and
-            # the camera is NOT covered, compare the current frame against saved
-            # known-person keyframes by pHash. A match means Heimdall already
-            # vetted this person as NORMAL — skip flagging them this frame. A
-            # covered/tampered camera always flags (no skip).
-            if phase == "ARMED" and now >= suppress_until and (kept or camera_covered):
-                if kept and not camera_covered:
-                    try:
-                        is_known, known_label = known.is_known(frame)
-                    except Exception as _e:
-                        is_known, known_label = False, None
-                        log.warning("known.is_known raised: %s", _e)
-                    if is_known:
-                        log.info("known person '%s' — skipping flag", known_label)
-                        frame_server.set_state(state)
-                        if show_window:
-                            display = annotate(frame, dets) if kept else frame.copy()
-                            _overlay(display, light, state, fps, alert_open=(phase == "ALERTED"))
-                            cv2.imshow("Warden Security", display)
-                            if cv2.waitKey(1) & 0xFF == ord("q"):
-                                break
-                        continue
+            # Disarmed systems never flag — the detector still runs for display.
+            if armed[0] and phase == "ARMED" and now >= suppress_until and (kept or camera_covered):
                 if camera_covered:
                     caption = "camera covered/blocked (tamper)"
                 else:
@@ -380,7 +423,7 @@ def main(argv: list[str] | None = None) -> int:
             frame_server.set_state(state)
             if show_window:
                 display = annotate(frame, dets) if kept else frame.copy()
-                _overlay(display, light, state, fps, alert_open=(phase == "ALERTED"))
+                _overlay(display, light, state, fps, alert_open=(phase == "ALERTED"), armed=armed[0])
                 cv2.imshow("Warden Security", display)
                 # Auto-popup of the alert frame when an alert spawns (Heimdall
                 # declared abnormal) so the guard sees what triggered it.
