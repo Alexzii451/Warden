@@ -701,7 +701,10 @@ export function getMessagesSince(
       SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me
       FROM messages
       WHERE chat_jid IN (${placeholders}) AND timestamp > ?
-        AND is_bot_message = 0 AND content NOT LIKE ?
+        AND (
+          is_bot_message = 0 AND content NOT LIKE ?
+          OR content LIKE 'AWARENESS%'
+        )
         AND content != '' AND content IS NOT NULL
         ${ideaFilter}
       ORDER BY timestamp DESC

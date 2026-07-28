@@ -901,9 +901,9 @@
           <select class="select" id="sHeimdallModel">${anyModelHtml}</select>
           <span class="dim mono" style="font-size:10px">vision verifier; blank = inherit orchestrator</span>
         </div>
-        <div class="setting-row"><label>Sentry</label>
+        <div class="setting-row"><label>Awareness (Sentry)</label>
           <select class="select" id="sSentryModel">${anyModelHtml}</select>
-          <span class="dim mono" style="font-size:10px">light data-only guard; blank = inherit orchestrator</span>
+          <span class="dim mono" style="font-size:10px">data-only guard that decides normal vs anomaly; blank = inherit orchestrator</span>
         </div>
         <div class="setting-row"><label>Security laptop IP</label>
           <input class="input" id="sSecurityLaptopIp" value="${escAttr(d.securityLaptopIp || '')}" placeholder="10.0.0.254">

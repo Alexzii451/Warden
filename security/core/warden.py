@@ -42,8 +42,17 @@ class WardenClient:
         return self._post(text)
 
     def _post(self, text: str) -> dict:
-        """POST a plain-text owner-chat message to Warden's /api/messages."""
-        payload = json.dumps({"jid": self.owner_jid, "text": text}).encode("utf-8")
+        """POST a plain-text owner-chat message to Warden's /api/messages.
+
+        AWARENESS events are internal control messages for Sentry and are stored
+        as bot messages on the server so they don't show in the human chat.
+        """
+        payload = json.dumps({
+            "jid": self.owner_jid,
+            "text": text,
+            "is_bot_message": text.startswith("AWARENESS"),
+            "sender_name": "Sentry" if text.startswith("AWARENESS") else None,
+        }, separators=(",", ":")).encode("utf-8")
         url = f"{self.base_url}/api/messages"
 
         try:
