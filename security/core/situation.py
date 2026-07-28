@@ -202,14 +202,11 @@ class SituationTracker:
             events.append(ChangeEvent("camera_uncovered", data={"ts": ts}))
         self._prev_covered = camera_covered
 
-        # Camera moved: only meaningful when not covered. A 10s dead-time stops
-        # one physical adjustment from producing a stream of events.
+        # Camera moved is a self-diagnostic, not an awareness event. If the camera
+        # physically moves we reset tracking state, but we do NOT notify Sentry.
         if camera_moved and (now - self._camera_moved_recent) >= 10.0:
-            events.append(ChangeEvent(
-                "camera_moved",
-                data={"ts": ts, "seconds_since_last": round(now - self._camera_moved_recent, 1)},
-            ))
             self._camera_moved_recent = now
+            self.reset()
 
         # Person arrivals: a new ID means someone new came into view. Report it
         # even if the room was already occupied — "one person, now two" is a change.
