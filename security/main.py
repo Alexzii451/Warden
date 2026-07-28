@@ -28,6 +28,7 @@ import logging
 import signal
 import sys
 import time
+from typing import Optional
 
 import cv2
 import numpy as np
@@ -125,10 +126,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     tracker = SituationTracker(
         presence_debounce=int(aware_cfg.get("presence_debounce", 3)),
-        empty_threshold_seconds=float(aware_cfg.get("empty_threshold_seconds", 30)),
-        motion_min_area=int(aware_cfg.get("motion_min_area", 500)),
-        motion_movement_px=int(aware_cfg.get("motion_movement_px", 40)),
-        camera_moved_threshold=int(aware_cfg.get("camera_moved_threshold", 12)),
+        empty_threshold_seconds=float(aware_cfg.get("empty_threshold_seconds", 60)),
+        departure_threshold_seconds=float(aware_cfg.get("departure_threshold_seconds", 30)),
+        motion_min_area=int(aware_cfg.get("motion_min_area", 1500)),
+        motion_movement_px=int(aware_cfg.get("motion_movement_px", 80)),
+        camera_moved_threshold=int(aware_cfg.get("camera_moved_threshold", 16)),
         camera_moved_history=int(aware_cfg.get("camera_moved_history", 5)),
         object_min_confidence=float(aware_cfg.get("object_min_confidence", 0.2)),
     )
@@ -176,6 +178,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Awareness posting cooldown (min seconds between any two AWARENESS messages).
     awareness_cooldown = float(aware_cfg.get("cooldown_seconds", 30))
+    last_awareness_event: Optional[str] = None
     last_awareness_post = 0.0
 
     interval = 1.0 / max(1, cam_cfg["fps"])
@@ -258,12 +261,17 @@ def main(argv: list[str] | None = None) -> int:
             # should probably be a single "arrival" event with movement data.
             if events:
                 since_last = now - last_awareness_post
-                if since_last >= awareness_cooldown:
-                    # Pick the highest-priority event to announce. Order matters.
-                    priority = ["camera_covered", "camera_moved", "arrival", "departure",
-                                "movement", "camera_uncovered", "motion_burst", "note"]
-                    chosen = min(events, key=lambda e: priority.index(e.event)
-                                 if e.event in priority else len(priority))
+                # Pick the highest-priority event to announce. Order matters.
+                priority = ["camera_covered", "camera_moved", "arrival", "departure",
+                            "movement", "camera_uncovered", "motion_burst", "note"]
+                chosen = min(events, key=lambda e: priority.index(e.event)
+                             if e.event in priority else len(priority))
+
+                # Only send if the situation actually changed from the last sent one,
+                # AND we're past the cooldown. This stops "85 messages of me sitting
+                # there" caused by repeated movement/wiggle events.
+                situation_digest = f"{chosen.event}:{chosen.subject_id}:{situation.person_count}:{situation.camera_covered}:{situation.camera_moved}"
+                if since_last >= awareness_cooldown and situation_digest != last_awareness_event:
                     payload = {
                         "event": chosen.event,
                         "situation": situation.to_dict(),
@@ -272,12 +280,16 @@ def main(argv: list[str] | None = None) -> int:
                     res = warden.send_awareness(chosen.event, payload)
                     if res.get("ok"):
                         last_awareness_post = now
+                        last_awareness_event = situation_digest
                         log.info("AWARENESS — %s posted", chosen.event)
                     else:
                         log.warning("AWARENESS %s not delivered: %s", chosen.event, res.get("error"))
                 else:
-                    log.info("AWARENESS events queued but cooldown active (%.0fs left)",
-                             awareness_cooldown - since_last)
+                    if since_last < awareness_cooldown:
+                        log.info("AWARENESS events queued but cooldown active (%.0fs left)",
+                                 awareness_cooldown - since_last)
+                    else:
+                        log.info("AWARENESS %s suppressed — same situation already reported", chosen.event)
 
             frame_server.set_state(state)
             if show_window:

@@ -48,13 +48,15 @@ awareness:
   # Consecutive frames with/without a person before flipping room occupied/empty.
   presence_debounce: 3
   # Room must have been empty at least this long before an arrival is announced.
-  empty_threshold_seconds: 30
+  empty_threshold_seconds: 60
+  # Minimum seconds a person must be continuously absent before a departure event is emitted.
+  departure_threshold_seconds: 30
   # Minimum motion-area to count as a "motion burst" while the room is empty.
-  motion_min_area: 500
+  motion_min_area: 1500
   # Centroid shift (pixels) that counts as a tracked person "movement" event.
-  motion_movement_px: 40
+  motion_movement_px: 80
   # pHash Hamming distance threshold for "camera moved". Lower = less sensitive.
-  camera_moved_threshold: 12
+  camera_moved_threshold: 16
   # Number of recent frame hashes to compare against for camera-moved detection.
   camera_moved_history: 5
   # Min confidence for non-person objects to be included in the situation JSON.

@@ -110,15 +110,17 @@ class SituationTracker:
     def __init__(
         self,
         presence_debounce: int = 3,
-        empty_threshold_seconds: float = 30.0,
-        motion_min_area: int = 500,
-        motion_movement_px: int = 40,
-        camera_moved_threshold: int = 12,
+        empty_threshold_seconds: float = 60.0,
+        departure_threshold_seconds: float = 30.0,
+        motion_min_area: int = 1500,
+        motion_movement_px: int = 80,
+        camera_moved_threshold: int = 16,
         camera_moved_history: int = 5,
         object_min_confidence: float = 0.2,
     ):
         self.presence_debounce = max(1, presence_debounce)
         self.empty_threshold_seconds = empty_threshold_seconds
+        self.departure_threshold_seconds = departure_threshold_seconds
         self.motion_min_area = motion_min_area
         self.motion_movement_px = motion_movement_px
         self.camera_moved_threshold = camera_moved_threshold
@@ -137,6 +139,7 @@ class SituationTracker:
         self._state_since = time.time()
         self._present_streak = 0
         self._absent_streak = 0
+        self._empty_since = time.time()
 
         # Camera-motion state.
         self._prev_phashes: deque = deque(maxlen=camera_moved_history)
@@ -170,6 +173,10 @@ class SituationTracker:
         room_occupied, seconds_in_state = self._update_occupancy(
             len(matched_ids) + len(new_persons), now
         )
+        # Track how long the room has been empty continuously, reset on any presence.
+        if room_occupied:
+            self._empty_since = now
+        empty_duration = now - self._empty_since
 
         # Detect camera motion from whole-frame pHash differences.
         camera_moved = self._detect_camera_moved(frame_bgr, camera_covered)
@@ -206,36 +213,42 @@ class SituationTracker:
             events.append(ChangeEvent("camera_uncovered", data={"ts": ts}))
         self._prev_covered = camera_covered
 
-        # Camera moved: only meaningful when not covered (uniform covered frame
-        # will look very different from a normal frame).
-        if camera_moved:
+        # Camera moved: only meaningful when not covered. Add a dead-time so
+        # one physical camera adjustment doesn't spam repeated events.
+        if camera_moved and (now - self._camera_moved_recent) >= 10.0:
             events.append(ChangeEvent(
                 "camera_moved",
                 data={"ts": ts, "seconds_since_last": round(now - self._camera_moved_recent, 1)},
             ))
             self._camera_moved_recent = now
 
-        # Person arrivals / departures.
+        # Person arrivals: only when the room was empty long enough — ignore
+        # brief re-entries and people already in frame at startup.
         for pid in new_persons:
-            events.append(ChangeEvent(
-                "arrival",
-                subject_id=pid,
-                data={"ts": ts, "person_count": len(persons_out)},
-            ))
+            if empty_duration >= self.empty_threshold_seconds:
+                events.append(ChangeEvent(
+                    "arrival",
+                    subject_id=pid,
+                    data={"ts": ts, "person_count": len(persons_out), "seconds_empty": round(empty_duration, 1)},
+                ))
 
-        # Gather IDs that disappeared this frame (missing count increased from 0).
+        # Person departures: only after the person has been gone for the full
+        # departure threshold, and only if we had announced an arrival for them
+        # (or if the room was occupied for a while).
         departed_ids = [
             pid for pid, p in self._tracked.items()
             if p.frames_missing == self.presence_debounce and pid not in matched_ids
         ]
         for pid in departed_ids:
-            events.append(ChangeEvent(
-                "departure",
-                subject_id=pid,
-                data={"ts": ts, "seconds_occupied": round(seconds_in_state, 1)},
-            ))
+            if seconds_in_state >= self.departure_threshold_seconds:
+                events.append(ChangeEvent(
+                    "departure",
+                    subject_id=pid,
+                    data={"ts": ts, "seconds_occupied": round(seconds_in_state, 1)},
+                ))
 
-        # Movement of tracked people.
+        # Movement of tracked people. Only flag significant centroid shifts, and
+        # only once per person until they settle (track the last announced move).
         for pid, p in self._tracked.items():
             if len(p.history) < 2 or p.frames_missing > 0:
                 continue
@@ -243,9 +256,16 @@ class SituationTracker:
             dx = p.cx - prev[0]
             dy = p.cy - prev[1]
             dist = (dx * dx + dy * dy) ** 0.5
-            # TODO: instead of raw centroid shift, detect "stood up", "sat down",
-            # "approached camera" by keypoint changes (head/shoulder height).
             if dist >= self.motion_movement_px:
+                # Suppress repeated movement events from the same person until
+                # they move back near their last announced position or sit still.
+                last_announced = getattr(p, '_last_announced_pos', None)
+                if last_announced is not None:
+                    lax, lay = last_announced
+                    back_near = ((p.cx - lax) ** 2 + (p.cy - lay) ** 2) ** 0.5 < self.motion_movement_px * 0.5
+                    if back_near:
+                        continue
+                p._last_announced_pos = (p.cx, p.cy)
                 events.append(ChangeEvent(
                     "movement",
                     subject_id=pid,
