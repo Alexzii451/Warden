@@ -265,10 +265,11 @@ def main(argv: list[str] | None = None) -> int:
                 chosen = min(events, key=lambda e: priority.index(e.event)
                              if e.event in priority else len(priority))
 
-                # Only send if the situation actually changed from the last sent one,
-                # AND we're past the cooldown. This stops "85 messages of me sitting
-                # there" caused by repeated movement/wiggle events.
-                situation_digest = f"{chosen.event}:{chosen.subject_id}:{situation.person_count}:{situation.camera_covered}:{situation.camera_moved}"
+                # Only send if the high-level situation actually changed from the
+                # last sent one, AND we're past the cooldown. This stops repeated
+                # arrival events caused by IDs flipping (a new person gets a new ID
+                # every time the tracker loses/re-acquires them).
+                situation_digest = f"{chosen.event}:count={situation.person_count}:occupied={situation.room_occupied}:covered={situation.camera_covered}:moved={situation.camera_moved}"
                 if since_last >= awareness_cooldown and situation_digest != last_awareness_event:
                     payload = {
                         "event": chosen.event,
