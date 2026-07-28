@@ -27,8 +27,10 @@ model:
   # Detection checkpoint size for the "detection" variant (nano|small|medium|
   # large). Ignored for keypoint (xlarge only).
   size: small
-  # Detection confidence floor. Keep it low; the tracker debounces noise.
-  threshold: 0.2
+  # Detection confidence floor. The keypoint model can hallucinate many
+  # overlapping low-confidence "person" boxes; keep this at 0.35+ and rely on
+  # the tracker + NMS to suppress duplicates.
+  threshold: 0.35
 
 # Motion detection. Frame differencing produces a motion mask; its nonzero area
 # is the motion signal. Used for "motion burst while empty" and for UI status.

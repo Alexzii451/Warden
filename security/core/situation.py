@@ -314,12 +314,17 @@ class SituationTracker:
     # ── Internal helpers ────────────────────────────────────────────────────
 
     def _split_detections(self, detections):
-        """Separate person detections from other COCO detections."""
+        """Separate person detections from other COCO detections.
+
+        Runs non-maximum suppression on person boxes to collapse the overlapping
+        hallucinations that the keypoint model sometimes emits at low confidence.
+        """
         persons = []
         objects = []
+        raw_persons = []
         for d in detections.detections:
             if d.class_name == "person":
-                persons.append(d)
+                raw_persons.append(d)
             elif d.confidence >= self.object_min_confidence:
                 objects.append(DetectedObject(
                     class_name=d.class_name,
@@ -329,9 +334,20 @@ class SituationTracker:
                     x2=float(d.xyxy[2]),
                     y2=float(d.xyxy[3]),
                 ))
-        # TODO: objects are currently empty with the keypoint model (person-only).
-        # Switch to a multi-class detection model or add a tiny YOLO-mobile for
-        # phones/laptops/chairs if room-object awareness matters.
+
+        # NMS to merge overlapping person detections into one real person.
+        # TODO: this is a coarse fix; the real issue is the model threshold. Once
+        # the threshold is raised, NMS should rarely need to merge more than 2 boxes.
+        if raw_persons:
+            boxes = np.array([[d.xyxy[0], d.xyxy[1], d.xyxy[2], d.xyxy[3]] for d in raw_persons], dtype=float)
+            scores = np.array([d.confidence for d in raw_persons], dtype=float)
+            keep = cv2.dnn.NMSBoxes(boxes.tolist(), scores.tolist(), 0.35, 0.5)
+            if keep is not None and len(keep) > 0:
+                keep = keep.flatten() if hasattr(keep, 'flatten') else keep
+                persons = [raw_persons[int(i)] for i in keep]
+            else:
+                persons = raw_persons
+
         return persons, objects
 
     def _update_tracks(self, persons, frame_w, frame_h):
