@@ -144,23 +144,28 @@ export async function captureWebcam(opts?: {
 
 /**
  * URL of the Security Mode app's frame server (set by WARDEN_SECURITY_FRAME_URL,
- * default http://127.0.0.1:8765/frame). When the security app is running it owns
- * /dev/video0, so webcam_capture pulls the latest frame from here instead of
- * fighting for the device. The security app publishes a JPEG on every capture.
+ * or passed directly, default http://127.0.0.1:8765/frame). When the security app
+ * is running it owns /dev/video0, so webcam_capture pulls the latest frame from
+ * here instead of fighting for the device. The security app publishes a JPEG on
+ * every capture.
  */
-const SECURITY_FRAME_URL: string =
-  process.env.WARDEN_SECURITY_FRAME_URL || 'http://127.0.0.1:8765/frame';
+const DEFAULT_SECURITY_FRAME_URL = 'http://127.0.0.1:8765/frame';
+
+function securityFrameUrl(override?: string): string {
+  return override || process.env.WARDEN_SECURITY_FRAME_URL || DEFAULT_SECURITY_FRAME_URL;
+}
 
 /**
  * Fetch the latest frame from the Security Mode app's HTTP /frame endpoint and
  * return it as a JPEG CapturedImage. Throws on any failure so the caller can
  * fall back to the ffmpeg path.
  */
-export async function captureWebcamFromSecurityApp(): Promise<CapturedImage> {
+export async function captureWebcamFromSecurityApp(url?: string): Promise<CapturedImage> {
+  const target = securityFrameUrl(url);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 3000);
   try {
-    const res = await fetch(SECURITY_FRAME_URL, { signal: controller.signal });
+    const res = await fetch(target, { signal: controller.signal });
     if (!res.ok) throw new Error(`frame server returned ${res.status}`);
     const buf = Buffer.from(await res.arrayBuffer());
     if (!buf || buf.length === 0) throw new Error('frame server returned empty body');
@@ -175,12 +180,12 @@ export async function captureWebcamFromSecurityApp(): Promise<CapturedImage> {
  * probe, 1s timeout). Used to decide whether to route webcam_capture through
  * the security app or grab /dev/video0 directly.
  */
-export async function securityAppHasFrameServer(): Promise<boolean> {
+export async function securityAppHasFrameServer(url?: string): Promise<boolean> {
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 1000);
     try {
-      const res = await fetch(SECURITY_FRAME_URL, { signal: controller.signal });
+      const res = await fetch(securityFrameUrl(url), { signal: controller.signal });
       return res.ok;
     } finally {
       clearTimeout(timer);

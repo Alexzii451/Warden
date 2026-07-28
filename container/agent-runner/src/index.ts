@@ -745,24 +745,47 @@ Be direct and specific — reference the exact point you're critiquing. Do not f
         label: 'Heimdall',
         maxIterations: 20,
         summary: "security-camera alerts: assess a flagged frame, decide normal vs abnormal, escalate + alert the user only if abnormal (and leave the alert OPEN for the user to close). Runs in the background; dies silently on non-events.",
-        systemPrompt: `You are Heimdall, the watchman of the Bifröst. You run in the background. The security-camera detector has FLAGGED a detection (a person, a vehicle, a thief-tool, or a covered camera) and sent you a frame to REVIEW. The alert is NOT spawned yet — that's your call. You review the frame and DECLARE whether this is a real alert (abnormal) or a non-event (normal). Only if you declare abnormal does the alert spawn (red button + the user is notified).
+        systemPrompt: `You are Heimdall, Warden's vision-based security verifier. You run in the background on a vision-capable model. Sentry (the lightweight data-only guard) has flagged a possible anomaly from the laptop camera's structured data. You are given that data plus a live frame from the laptop.
+
+Your job: CONFIRM or DENY the anomaly.
 
 TIME — the exact current local time and timezone is given at the top of your task. Reference every event by that time/date.
 
-CRITERIA — the HEIMDALL.md reference injected above (the "=== heimdall reference (read-only) ===" block) defines what is NORMAL (dismiss silently) and what is ABNORMAL (trigger the alarm). It also lists the people/things that are expected here. Judge the frame against HEIMDALL.md — it is the single source of truth for what to alert on. If the file is empty or silent on what you're looking at, default to ABNORMAL for an unknown person / tools-bags / vehicle / camera-tamper, NORMAL for a pet / shadow / light change / routine motion.
+DATA FORMAT — the AWARENESS data is JSON. It contains the event type, the full situation (persons, camera state, room occupancy, motion), and the event-specific payload. Use the situation.persons list for who/where; use room.occupied and seconds_in_state for context.
 
-MEMORY — security_log is your persistent memory for BEHAVIOURAL PATTERNS. After every review, record it (action: record) with the alert timestamp, your assessment (normal/abnormal), the condition, and whether you escalated. Use security_log (action: query) to look back by time/date and learn what's normal here at this hour (e.g. motion at the same time every night = a normal pattern). You learn PATTERNS OF ACTIVITY — you do NOT identify people. Never claim to "recognize" a specific person from the log; the log records conditions and times, not identities. Who someone is comes only from the HEIMDALL.md criteria.
+CONFIRMED (abnormal):
+- The described situation is actually happening in the frame (e.g. unknown person present when the user should be away, camera covered/tampered, clear intrusion).
+- Call send_message ONCE with sender="Heimdall" and a concise alert — include the image tag exactly as provided in your task so the user sees the frame in the dashboard/Telegram.
+- Then call open_security_alert ONCE to light the red alert on the laptop.
+- Record security_log (assessment=abnormal, escalated=true).
+- Then STOP.
 
-The flagged frame is attached as [Image: groups/owner/attachments/sec-<ts>.jpg]. Read it to see what the camera caught. You may call webcam_capture for a fresh live frame if you want another look.
+DENIED (false positive):
+- The data doesn't match the frame (e.g. labelled person is not actually there, motion was a pet/shadow, camera moved but scene is normal).
+- Record security_log (assessment=normal, escalated=false).
+- Do NOT send_message. Do NOT call open_security_alert.
+- STOP silently.
 
-TOOLS — you control the detector: arm_security (enable flagging), disarm_security (pause flagging), open_security_alert (trigger the alarm — red button), dismiss_security_flag (clear the alert / re-arm). Use them when the user asks or when the situation calls for it.
+If uncertain, lean toward DENY unless the visual evidence clearly supports the anomaly. The user only wants to be bothered for real problems.
 
-DECLARE (call each tool AT MOST ONCE — never repeat a tool call):
-- NORMAL: call security_log (record, assessment=normal, condition=...) to log the pattern, then call dismiss_security_flag to clear the flag and re-arm the detector, then STOP. Do NOT send_message. Do NOT alert_security. Do NOT open_security_alert. Die silently.
-- ABNORMAL: call security_log (record, assessment=abnormal, condition=..., escalated=true), then alert_security ONCE to escalate (mock stub — call it for real), then send_message ONCE to tell the user concisely what you see and whether they should be concerned — INCLUDE the alert image by appending " [Image: <frame_path>]" (use the frame_path from the task's [Image: ...]) so the image is attached and shows in the chat / Telegram, then open_security_alert ONCE to spawn the alert (red button) on the detector, then STOP. The alert stays open until dismissed (dismiss_security_flag) or the guard presses STAND DOWN. While it's open the detector will NOT flag more, so the user isn't spammed while they handle it.
-
-Keep any message short. Never repeat a tool call.`,
+Keep any alert message short — one or two plain sentences, no markdown, no emoji. Never repeat a tool call.`,
         toolsets: ['security-core'],
+    },
+    {
+        delegate: 'sentry',
+        label: 'Sentry',
+        maxIterations: 8, // greetings are short — a couple of tool calls at most
+        summary: "situational awareness: assess a webcam AWARENESS event (arrival/departure/unknown/covered) using the detector's raw data + history, and speak a brief greeting/note only if it's worth announcing. Runs in the background; dies silently on non-events.",
+        systemPrompt: `You are Sentry, Warden's situational-awareness agent. You run in the background on a light local model. The webcam detector posts an AWARENESS event as structured JSON: event type, person count, known/unknown labels, motion area, room empty/occupied duration, camera state, and time.
+
+Your full normal/allowed rules are in the file security/sentry.md (already loaded above this prompt). Judge the event against those rules.
+
+If the event is normal or a friendly arrival, you may send a brief greeting via send_message with sender="Sentry" (one short sentence, plain English). Otherwise stay silent and record awareness_log.
+
+If the event is anomalous, call escalate_to_heimdall ONCE with a concise reason. Do NOT send_message the user yourself. Heimdall will pull a live frame and confirm.
+
+You may call security_frame once if the data alone is genuinely insufficient, but prefer not to.`,
+        toolsets: ['awareness-core'],
     },
 ];
 
@@ -775,7 +798,13 @@ function getSubAgentToolNames(subagent: SubAgentDef): string[] {
 const SUBAGENT_OWNED = new Set<string>(SUBAGENTS.flatMap(s => getSubAgentToolNames(s)));
 const SUBAGENT_BY_DELEGATE = new Map<string, SubAgentDef>(SUBAGENTS.map(s => [s.delegate, s]));
 
-const ORCHESTRATOR_SHARED_TOOLS = new Set<string>(['convert_file', 'api_request', 'list_api_keys']);
+const ORCHESTRATOR_SHARED_TOOLS = new Set<string>([
+    'convert_file', 'api_request', 'list_api_keys',
+    // The orchestrator's EYES — also listed in Heimdall/Sentry toolsets, so
+    // without this the SUBAGENT_OWNED filter would strip them from the
+    // orchestrator's tool defs and the # EYES instructions couldn't fire.
+    'desktop_screenshot', 'webcam_capture', 'read_image',
+]);
 
 // Artemis: read-only auditor tools (Bash included for read-only inspection:
 // sqlite3 queries against the store DB, reading service logs — never writes)
@@ -1656,6 +1685,10 @@ async function runNativeOllama(input: ContainerInput) {
         // to the orchestrator so it can take a screenshot / webcam frame / read a
         // host image and inspect it directly instead of delegating to a sub-agent.
         'desktop_screenshot', 'webcam_capture', 'read_image',
+        // Orchestrator → Sentry direct line (registered by awareness-tools.ts,
+        // toolset 'chat'). Always exposed so presence/schedule notes from the
+        // user reach Sentry regardless of the dynamic top-K ranking.
+        'tell_sentry',
     ]);
     const DYNAMIC_TOOL_TOP_K = 12;
     let activeToolDefs = fullToolDefs;
@@ -1784,6 +1817,10 @@ Because you are the orchestrator and not the specialist: never try to do hands-o
 The host is **Arch Linux** running **KDE Plasma on Wayland**. The system package manager is **pacman** — to install a package, use \`sudo pacman -S <pkg>\` (\`--needed\` to skip what's already installed, \`--noconfirm\` for non-interactive). Never use apt, apt-get, yum, dnf, brew, or pip for system packages — only pacman. Warden runs directly on the host with full filesystem and shell access; there is no container, sandbox, or cage. sudo is interactive — the user types the password in their terminal, so any task that needs a system package goes to **atlas**: atlas runs the pacman install once and tells the user a password prompt is waiting. Do not attempt package installs yourself; you have no shell.
 
 The dashboard has a **Notes** view — an Obsidian-style markdown vault rooted at \`~/Documents/Notes\`. Notes are plain \`.md\` files on disk with \`[[wiki-links]]\` and \`#tags\`; the dashboard is just a viewer/editor over them. If the user asks to read, find, create, edit, or organize a note, delegate to **atlas** to operate on files in that directory.
+
+# EYES — YOUR SURROUNDINGS
+
+You have a webcam (\`webcam_capture\`) facing the room. For a contextual question about your immediate surroundings — "what do you see", "what's around you", "who's there", "what's that over there", "is someone at the door" — call \`webcam_capture\` once, look at the frame yourself, and answer directly in spoken English. Do NOT delegate this to a sub-agent: sub-agents cannot see images (only you can). Keep it to a sentence or two. (Requires your model to be vision-capable; if it isn't, say briefly that you can't see right now.)
 
 # WHAT THE USER HEARS
 
@@ -3757,6 +3794,52 @@ async function main() {
         } catch (err: any) {
             log(`[heimdall] error: ${err.message}`);
             writeOutput({ status: 'error', result: null, error: `Heimdall error: ${err.message}` });
+        }
+        if ((globalThis as any)._keepAlive) clearInterval((globalThis as any)._keepAlive);
+        process.exit(0);
+    }
+
+    // Sentry run-mode: mirrors the Heimdall branch above. The host spawns this
+    // process with agent:'sentry' (AWARENESS event from the detector's presence
+    // tracker, or a tell_sentry note) to run the background awareness agent
+    // directly — NOT the orchestrator loop. Tool calls (send_message,
+    // webcam_capture, awareness_log, escalate_to_heimdall) route to the host via
+    // CALLBACK stdio.
+    if (containerInput.agent === 'sentry') {
+        try {
+            const def = SUBAGENT_BY_DELEGATE.get('sentry');
+            if (!def) throw new Error('sentry sub-agent not defined');
+            const tools = SUBAGENT_TOOL_DEFS.get('sentry') || [];
+            const ctx = {
+                chatJid: containerInput.chatJid || 'owner@local',
+                groupFolder: containerInput.groupFolder || 'owner',
+                isMain: containerInput.isMain ?? true,
+                userId: process.env.WARDEN_USER_ID || '',
+            };
+            // The host resolves the model (sentry:model router key) and passes it
+            // in containerInput.model. The fallback here is intentionally generic
+            // because the host is the source of truth for the dashboard setting.
+            const model = containerInput.model || 'granite4:latest';
+            // Same num_ctx/unload parity as Heimdall: resolve orchestrator-scoped
+            // settings against this model.
+            if (model) ORCHESTRATOR_MODEL = model;
+            // Load the user's editable rules from security/sentry.md.
+            let systemPrompt = def.systemPrompt;
+            try {
+                const sentryMdPath = path.join(containerInput.workspaceRoot || '', 'security', 'sentry.md');
+                const sentryMd = fs.existsSync(sentryMdPath) ? fs.readFileSync(sentryMdPath, 'utf8') : '';
+                if (sentryMd) {
+                    systemPrompt = `=== Sentry rules (read-only) ===\n${sentryMd}\n\n=== Sentry operating instructions ===\n${systemPrompt}`;
+                }
+            } catch (e: any) {
+                log(`[sentry] could not read sentry.md: ${e.message}`);
+            }
+            log(`[sentry] starting background awareness agent: model=${model || '(none)'}, tools=${tools.length}, task="${(containerInput.prompt || '').slice(0, 80)}"`);
+            const sa = await runSubAgent('sentry', model, systemPrompt, tools, containerInput.prompt || '', ctx, def.maxIterations);
+            writeOutput({ status: 'success', result: sa.content || 'Sentry: done (silent).', error: null });
+        } catch (err: any) {
+            log(`[sentry] error: ${err.message}`);
+            writeOutput({ status: 'error', result: null, error: `Sentry error: ${err.message}` });
         }
         if ((globalThis as any)._keepAlive) clearInterval((globalThis as any)._keepAlive);
         process.exit(0);

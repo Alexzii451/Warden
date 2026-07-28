@@ -45,6 +45,23 @@ function getDb(): Database.Database {
     CREATE INDEX IF NOT EXISTS idx_security_log_ts ON security_log(ts);
     CREATE INDEX IF NOT EXISTS idx_security_log_assessment ON security_log(assessment);
     CREATE INDEX IF NOT EXISTS idx_security_log_camera ON security_log(camera);
+    -- Sentry's situational-awareness history, same store. One row per
+    -- AWARENESS event (pre-written by the host when routed, so an event is
+    -- always recorded even if Sentry crashes) plus Sentry's own verdict rows.
+    CREATE TABLE IF NOT EXISTS awareness_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts TEXT NOT NULL,
+      event TEXT,
+      label TEXT,
+      is_known INTEGER,
+      seconds_empty REAL,
+      assessment TEXT,
+      spoken TEXT,
+      data TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_awareness_log_ts ON awareness_log(ts);
+    CREATE INDEX IF NOT EXISTS idx_awareness_log_event ON awareness_log(event);
   `);
   // In-place migrations: add any columns missing from an older schema (CREATE
   // TABLE IF NOT EXISTS won't upgrade an existing table). Idempotent — skips
@@ -146,6 +163,98 @@ export function securityLog(args: any): { ok: boolean; summary?: string; error?:
       ).all(...params) as { assessment: string | null; n: number }[];
       const total = byAssessment.reduce((s, r) => s + r.n, 0);
       const lines = byAssessment.map((r) => `${r.assessment || 'null'}: ${r.n}`);
+      return { ok: true, summary: `${total} record(s)${since ? ` since ${since}` : ''} — ${lines.join(', ') || 'none'}` };
+    }
+
+    return { ok: false, error: `unknown action: ${action} (use record | query | stats)` };
+  } catch (err: any) {
+    return { ok: false, error: String(err?.message ?? err) };
+  }
+}
+
+// ─── Awareness log (Sentry) ────────────────────────────────────────────────
+// Mirrors securityLog above, over the awareness_log table. Sentry records one
+// row per AWARENESS event with its verdict (assessment: spoken|silent|note|
+// flagged) and de-dups by querying recent rows before greeting again. Column
+// fields cover the queryable data; everything else lands in the JSON `data`
+// column (open schema — no migrations needed as the event payload evolves).
+
+const AWARENESS_KNOWN_FIELDS = new Set([
+  'action', 'ts', 'event', 'label', 'is_known', 'seconds_empty', 'assessment', 'spoken',
+]);
+
+interface AwarenessRow {
+  ts: string; event: string | null; label: string | null; is_known: number | null;
+  seconds_empty: number | null; assessment: string | null; spoken: string | null; data: string | null;
+}
+
+export function awarenessLog(args: any): { ok: boolean; summary?: string; error?: string; rows?: any[] } {
+  try {
+    const action = args?.action;
+    const d = getDb();
+
+    if (action === 'record') {
+      const extras: Record<string, any> = {};
+      for (const k of Object.keys(args || {})) {
+        if (!AWARENESS_KNOWN_FIELDS.has(k) && k !== 'data') extras[k] = (args as any)[k];
+      }
+      if (args?.data && typeof args.data === 'object') Object.assign(extras, args.data);
+      const ts = typeof args?.ts === 'string' ? args.ts : new Date().toISOString();
+      d.prepare(
+        `INSERT INTO awareness_log
+         (ts, event, label, is_known, seconds_empty, assessment, spoken, data, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        ts,
+        typeof args?.event === 'string' ? args.event : null,
+        typeof args?.label === 'string' ? args.label : null,
+        args?.is_known == null ? null : (args.is_known ? 1 : 0),
+        typeof args?.seconds_empty === 'number' ? args.seconds_empty : null,
+        typeof args?.assessment === 'string' ? args.assessment : null,
+        typeof args?.spoken === 'string' ? args.spoken : null,
+        Object.keys(extras).length ? JSON.stringify(extras) : null,
+        new Date().toISOString(),
+      );
+      return { ok: true };
+    }
+
+    if (action === 'query') {
+      const since = typeof args?.since === 'string' ? args.since : null;
+      const until = typeof args?.until === 'string' ? args.until : null;
+      const event = typeof args?.event === 'string' ? args.event : null;
+      const assessment = typeof args?.assessment === 'string' ? args.assessment : null;
+      const limit = Math.min(Math.max(parseInt(args?.limit, 10) || 50, 1), 1000);
+      let sql = 'SELECT ts, event, label, is_known, seconds_empty, assessment, spoken, data FROM awareness_log';
+      const cond: string[] = [];
+      const params: any[] = [];
+      if (since) { cond.push('ts >= ?'); params.push(since); }
+      if (until) { cond.push('ts <= ?'); params.push(until); }
+      if (event) { cond.push('event = ?'); params.push(event); }
+      if (assessment) { cond.push('assessment = ?'); params.push(assessment); }
+      if (cond.length) sql += ' WHERE ' + cond.join(' AND ');
+      sql += ' ORDER BY ts DESC LIMIT ?';
+      params.push(limit);
+      const rows = d.prepare(sql).all(...params) as AwarenessRow[];
+      if (rows.length === 0) return { ok: true, summary: 'No matching rows.', rows: [] };
+      const lines = rows.map((r) => {
+        const who = r.label ? ` ${r.label}` : (r.is_known != null ? (r.is_known ? ' known' : ' unknown') : '');
+        const empty = r.seconds_empty != null ? ` empty=${Math.round(r.seconds_empty)}s` : '';
+        const said = r.spoken ? ` said:"${r.spoken}"` : '';
+        const extra = r.data ? ` {${r.data}}` : '';
+        return `[${r.ts}] ${r.event || '?'}${who}${empty} — ${r.assessment || '?'}${said}${extra}`;
+      });
+      return { ok: true, summary: `${rows.length} row(s):\n` + lines.join('\n'), rows: rows as any };
+    }
+
+    if (action === 'stats') {
+      const since = typeof args?.since === 'string' ? args.since : null;
+      const where = since ? 'WHERE ts >= ?' : '';
+      const params = since ? [since] : [];
+      const byEvent = d.prepare(
+        `SELECT event, COUNT(*) n FROM awareness_log ${where} GROUP BY event`,
+      ).all(...params) as { event: string | null; n: number }[];
+      const total = byEvent.reduce((s, r) => s + r.n, 0);
+      const lines = byEvent.map((r) => `${r.event || 'null'}: ${r.n}`);
       return { ok: true, summary: `${total} record(s)${since ? ` since ${since}` : ''} — ${lines.join(', ') || 'none'}` };
     }
 

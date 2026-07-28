@@ -1,15 +1,12 @@
-"""Warden alert client — sends a security trigger to Warden as a chat message.
+"""Warden awareness client — sends structured situation events as chat messages.
 
-When the cheap detector fires, this writes the frame into the owner group's
-attachments dir and POSTs a message to Warden's /api/messages (the same path
-the dashboard uses). The message includes the frame as an `[Image: ...]`
-reference plus an instruction prompt (the "system prompt when something comes
-in") so Warden's vision agent knows what to do: read the frame, decide whether
-it's worth alerting the user, and send_message if so (which voice/ speaks).
+The security detector no longer ships JPEG frames for routine awareness.
+Instead it posts compact JSON AWARENESS events to Warden's /api/messages.
+Warden routes any message starting with 'AWARENESS' to Sentry (the background
+situational-awareness agent), which decides whether to speak to the user.
 
-No Warden-side code changes are required — the message arrives like any other
-owner-chat message and the poll loop spawns the agent. The 2-way frame-pull
-(dedicated alert skill, request_camera_frame, etc.) is a later step.
+If a future escalation path is needed, it should be added back as a separate
+structured call with a reason, not as an image attachment.
 """
 
 from __future__ import annotations
@@ -19,42 +16,33 @@ import logging
 import time
 import urllib.request
 import urllib.error
-from pathlib import Path
-
-import cv2
-import numpy as np
 
 log = logging.getLogger("security.warden")
 
-# The trigger sent with every alert. Heimdall's system prompt carries all the
-# behavioral logic; this just tells it what fired and where the frame is.
-ALERT_PROMPT = (
-    "SECURITY ALERT — {caption} at {ts}. Frame: [Image: {ref}]. "
-    "Read the frame and handle per your instructions."
-)
+AWARENESS_PROMPT = "AWARENESS — {event} at {ts}. data: {data}"
 
 
 class WardenClient:
-    def __init__(self, base_url: str, owner_jid: str, attachments_dir: str):
+    def __init__(self, base_url: str, owner_jid: str):
         self.base_url = base_url.rstrip("/")
         self.owner_jid = owner_jid
-        self.attachments_dir = Path(attachments_dir)
-        self.attachments_dir.mkdir(parents=True, exist_ok=True)
 
-    def send_alert(self, frame_bgr: np.ndarray, caption: str) -> dict:
-        """Write the frame to attachments, POST an alert message to Warden.
+    def send_awareness(self, event: str, data: dict) -> dict:
+        """POST an AWARENESS event to Warden as a plain chat message.
 
-        Returns the Warden response (or an {ok:false,error:...} dict on failure).
+        `event` is the semantic change type (arrival, departure, movement,
+        camera_covered, camera_uncovered, camera_moved, motion_burst, note).
+        `data` is the JSON payload for Sentry to reason about.
         """
-        ts = time.strftime("%Y%m%dT%H%M%S")
-        fname = f"sec-{ts}.jpg"
-        ref = f"groups/owner/attachments/{fname}"  # relative to Warden repo root
-        abs_path = self.attachments_dir / fname
-        ok = cv2.imwrite(str(abs_path), frame_bgr)
-        if not ok:
-            return {"ok": False, "error": f"failed to write frame to {abs_path}"}
+        ts = str(data.get("ts") or time.strftime("%Y%m%dT%H%M%S"))
+        data = dict(data, ts=ts)
+        text = AWARENESS_PROMPT.format(
+            event=event, ts=ts, data=json.dumps(data, separators=(",", ":")),
+        )
+        return self._post(text)
 
-        text = ALERT_PROMPT.format(caption=caption, ts=ts, ref=ref)
+    def _post(self, text: str) -> dict:
+        """POST a plain-text owner-chat message to Warden's /api/messages."""
         payload = json.dumps({"jid": self.owner_jid, "text": text}).encode("utf-8")
         url = f"{self.base_url}/api/messages"
 
@@ -65,11 +53,11 @@ class WardenClient:
             )
             with urllib.request.urlopen(req, timeout=5) as resp:
                 body = resp.read().decode("utf-8", "replace")
-                log.info("alert sent to Warden (%s): %s", resp.status, body[:200])
-                return {"ok": True, "status": resp.status, "ref": ref}
+                log.info("message sent to Warden (%s): %s", resp.status, body[:200])
+                return {"ok": True, "status": resp.status}
         except urllib.error.URLError as e:
-            log.warning("Warden unreachable (%s) — alert not delivered: %s", url, e)
+            log.warning("Warden unreachable (%s) — event not delivered: %s", url, e)
             return {"ok": False, "error": str(e)}
         except Exception as e:
-            log.warning("alert POST failed: %s", e)
+            log.warning("event POST failed: %s", e)
             return {"ok": False, "error": str(e)}

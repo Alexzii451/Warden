@@ -899,7 +899,14 @@
         </div>
         <div class="setting-row"><label>Heimdall</label>
           <select class="select" id="sHeimdallModel">${anyModelHtml}</select>
-          <span class="dim mono" style="font-size:10px">security agent; blank = inherit orchestrator; needs vision</span>
+          <span class="dim mono" style="font-size:10px">vision verifier; blank = inherit orchestrator</span>
+        </div>
+        <div class="setting-row"><label>Sentry</label>
+          <select class="select" id="sSentryModel">${anyModelHtml}</select>
+          <span class="dim mono" style="font-size:10px">light data-only guard; blank = inherit orchestrator</span>
+        </div>
+        <div class="setting-row"><label>Security laptop IP</label>
+          <input class="input" id="sSecurityLaptopIp" value="${escAttr(d.securityLaptopIp || '')}" placeholder="10.0.0.254">
         </div>
         <div class="setting-row"><label>Thinking</label>
           <select class="select" id="sThinking">
@@ -924,6 +931,16 @@
         <div class="hint">Rename Ollama models for display in dropdowns. Blank = use original tag.</div>
         <div id="friendlyList"></div>
         <div class="save-row"><button class="btn btn-primary btn-sm" id="btnSaveFriendly">Save</button><span class="status" id="friendlyStatus"></span></div>
+      </div>
+
+      <div class="setting-card">
+        <h3>Security — Sentry rules</h3>
+        <div class="hint">Edit security/sentry.md. Sentry uses this file to decide what camera events are normal vs anomalous.</div>
+        <textarea class="input" id="sSentryMd" rows="16" style="font-family:monospace;font-size:12px;white-space:pre-wrap">${escAttr(d.sentryMd || '')}</textarea>
+        <div class="save-row">
+          <button class="btn btn-primary btn-sm" id="btnSaveSentryMd">Save Sentry.md</button>
+          <span class="status" id="sentryMdStatus"></span>
+        </div>
       </div>
 
       <div class="setting-card">
@@ -962,6 +979,8 @@
     setSelect('sMercuryModel', (d.mercuryModel || '').replace(/^local:/, ''));
     setSelect('sMercuryCtx', d.mercuryCtx || '');
     setSelect('sHeimdallModel', (d.heimdallModel || '').replace(/^local:/, ''));
+    setSelect('sSentryModel', (d.sentryModel || '').replace(/^local:/, ''));
+    $('sSecurityLaptopIp').value = esc(d.securityLaptopIp || '');
     setSelect('sThinking', d.thinking || 'true');
     setSelect('sOrchestratorCtx', d.orchestratorCtx || '');
     setSelect('sAtlasCtx', d.atlasCtx || '');
@@ -986,6 +1005,7 @@
     $('btnSaveModels').addEventListener('click', saveModels);
     $('btnSaveAutomation').addEventListener('click', saveAutomation);
     $('btnSaveFriendly').addEventListener('click', saveFriendly);
+    $('btnSaveSentryMd').addEventListener('click', saveSentryMd);
     $('btnRestartServer2').addEventListener('click', restartServer);
 
     refreshLogInfo();
@@ -1065,6 +1085,8 @@
         mercuryModel: stripLocal($('sMercuryModel').value),
         mercuryCtx: $('sMercuryCtx').value,
         heimdallModel: stripLocal($('sHeimdallModel').value),
+        sentryModel: stripLocal($('sSentryModel').value),
+        securityLaptopIp: $('sSecurityLaptopIp').value.trim(),
         thinking: $('sThinking').value,
         orchestratorCtx: $('sOrchestratorCtx').value,
         atlasCtx: $('sAtlasCtx').value,
@@ -1107,6 +1129,19 @@
       STATE.cachedFriendlyNames = names;
       st.textContent = 'saved'; st.className = 'status ok';
       toast('Friendly names saved', 'success');
+    } catch (e) {
+      st.textContent = 'failed: ' + e.message; st.className = 'status err';
+    }
+  }
+
+  async function saveSentryMd() {
+    const st = $('sentryMdStatus');
+    st.textContent = 'saving…'; st.className = 'status';
+    try {
+      const content = $('sSentryMd').value;
+      await postJson('/api/security/sentry-md', { content });
+      st.textContent = 'saved'; st.className = 'status ok';
+      toast('Sentry rules saved', 'success');
     } catch (e) {
       st.textContent = 'failed: ' + e.message; st.className = 'status err';
     }

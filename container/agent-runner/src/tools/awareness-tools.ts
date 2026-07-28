@@ -9,14 +9,14 @@ async function callHost(tool: string, args: any, timeoutMs = 10000): Promise<any
     }
 }
 
-// Situational-awareness tools (Awareness, the background awareness agent). Mirrors
-// security-tools.ts. awareness_log records/queries Awareness's sqlite history;
-// tell_awareness lets the orchestrator pass a fact to Awareness (recorded as context).
+// Situational-awareness tools (Sentry, the background awareness agent). Mirrors
+// security-tools.ts. awareness_log records/queries Sentry's sqlite history;
+// tell_sentry lets the orchestrator pass a fact to Sentry (recorded as context).
 
 registry.register({
     name: 'awareness_log',
     description:
-        "Record or query Awareness's situational-awareness log (a persistent sqlite store of every " +
+        "Record or query Sentry's situational-awareness log (a persistent sqlite store of every " +
         "AWARENESS event and your verdicts, by time). ACTION 'record': append a row {ts, event, " +
         "label, is_known, person_count, seconds_empty, seconds_occupied, motion_area, assessment " +
         "('spoken'|'silent'|'note'|'flagged'), spoken (the line you said, if any), data (extra json)}. " +
@@ -58,31 +58,58 @@ registry.register({
     tier: 'public',
 });
 
-// Orchestrator → Awareness direct. Mirrors tell_heimdall (security-tools.ts).
+// Orchestrator → Sentry direct. Mirrors tell_heimdall (security-tools.ts).
 // tier:'public' + toolset 'chat' keeps it orchestrator-only (sub-agents don't
 // include 'chat'). The user tells Jarvis a fact that should affect greeting
-// behavior; Awareness records it silently, no chat reply.
+// behavior; Sentry records it silently, no chat reply.
 registry.register({
-    name: 'tell_awareness',
+    name: 'tell_sentry',
     description:
-        "Send a message directly to Awareness, the background situational-awareness agent. Use this when " +
+        "Send a message directly to Sentry, the background situational-awareness agent. Use this when " +
         "the user wants to tell Jarvis something about their presence/schedule that should affect " +
         "greeting behavior (e.g. 'heading out for the evening', 'I'm back, no need to greet me', " +
-        "'my partner is staying over') so Awareness records it and factors it into future greetings. Do NOT " +
-        "use the security agent for awareness notes — use this. Awareness records the message silently; it " +
+        "'my partner is staying over') so Sentry records it and factors it into future greetings. Do NOT " +
+        "use the security agent for awareness notes — use this. Sentry records the message silently; it " +
         "will not reply in the chat. Returns confirmation.",
     schema: {
         type: 'object',
         properties: {
-            message: { type: 'string', description: 'The message to pass to Awareness.' },
+            message: { type: 'string', description: 'The message to pass to Sentry.' },
         },
         required: ['message'],
     },
     handler: async (args, _context) => {
-        const resp = await callHost('tell_awareness', { message: String(args?.message || '') });
-        if (resp?.ok) return `Told Awareness: ${String(args?.message || '').slice(0, 120)}. It will record this for future greetings.`;
-        return `Could not reach Awareness: ${resp?.error || 'unknown error'}`;
+        const resp = await callHost('tell_sentry', { message: String(args?.message || '') });
+        if (resp?.ok) return `Told Sentry: ${String(args?.message || '').slice(0, 120)}. It will record this for future greetings.`;
+        return `Could not reach Sentry: ${resp?.error || 'unknown error'}`;
     },
     toolset: 'chat',
+    tier: 'public',
+});
+
+// Sentry → Heimdall escalation. Sentry decides from JSON data that something is
+// anomalous; Heimdall confirms with vision. The host handles the handoff.
+registry.register({
+    name: 'escalate_to_heimdall',
+    description:
+        "Escalate an anomalous AWARENESS event to Heimdall for vision confirmation. " +
+        "Call this ONCE when the structured data indicates something abnormal (unknown person, " +
+        "presence when the user is away, camera tamper, etc.). Provide a concise reason. " +
+        "Heimdall will pull a live frame, confirm or deny, and alert the user if needed.",
+    schema: {
+        type: 'object',
+        properties: {
+            reason: { type: 'string', description: 'Why Sentry considers this anomalous.' },
+        },
+        required: ['reason'],
+    },
+    handler: async (args, _context) => {
+        const reason = String(args?.reason || '').trim();
+        if (!reason) return 'Missing reason.';
+        const resp = await callHost('escalate_to_heimdall', { reason });
+        if (resp?.ok) return 'Escalated to Heimdall for vision confirmation.';
+        return `Could not escalate: ${resp?.error || 'unknown error'}`;
+    },
+    toolset: 'awareness',
     tier: 'public',
 });

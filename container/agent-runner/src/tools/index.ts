@@ -23,3 +23,4 @@ import './host-tools.js';
 import './desktop.js';
 import './browser.js';
 import './security-tools.js';
+import './awareness-tools.js';

@@ -4,6 +4,8 @@ import http from 'node:http';
 import path from 'path';
 import { spawn, execSync } from 'node:child_process';
 
+import { processImage } from './image.js';
+
 import {
   AGENT_TIMEOUT,
   ASSISTANT_NAME,
@@ -76,7 +78,7 @@ import { startStatusServer, pushNotification } from './status-server.js';
 import { Channel, NewMessage, OWNER_JID, AgentInput, ScheduledTask } from './types.js';
 import { logger } from './logger.js';
 import { captureScreenshot, captureWebcam, captureWebcamFromSecurityApp, securityAppHasFrameServer, readHostImage } from './capture.js';
-import { securityLog } from './security-log.js';
+import { securityLog, awarenessLog } from './security-log.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -116,6 +118,7 @@ let lastTimestamp = '';
 let lastAgentTimestamp = '';
 let messageLoopRunning = false;
 export let agentProcessing = false;
+let lastAwarenessEvent: string = '';
 
 const channels: Channel[] = [];
 
@@ -223,11 +226,11 @@ function buildPrompt(newMessages: NewMessage[]): string {
   // Fetch last N+2 messages (both sides) and exclude the current pending ones to
   // get up to N turns of real back-and-forth context.
   const rawHistory = getChatHistory(OWNER_JID, MERCURY_RECENT_MESSAGES + 2) as unknown as NewMessage[];
-  // Exclude Heimdall (the background security agent) messages — its abnormal
-  // alerts are stored for the user/dashboard, but the orchestrator must NOT see
-  // them in its history (otherwise it parrots/acknowledges them next turn).
+  // Exclude background agent messages (Heimdall security alerts, Sentry
+  // greetings) — they are stored for the user/dashboard, but the orchestrator
+  // must NOT see them in its history (otherwise it parrots/acknowledges them).
   const contextMessages = rawHistory
-    .filter((m) => !pendingIds.has(m.id) && (m.sender_name || '') !== 'Heimdall')
+    .filter((m) => !pendingIds.has(m.id) && !['Heimdall', 'Sentry'].includes(m.sender_name || ''))
     .slice(-MERCURY_RECENT_MESSAGES);
 
   if (contextMessages.length > 0) {
@@ -298,6 +301,61 @@ async function deliverReply(text: string): Promise<void> {
 }
 
 /**
+ * Sentry (situational-awareness agent) model resolution. Uses the dedicated
+ * sentry:model router setting (dashboard Models card). Falls back to the
+ * orchestrator model only if unset. A `local:` prefix is stripped.
+ */
+function resolveAwarenessModel(): string {
+  return (getRouterState('sentry:model') || getRouterState('orchestrator:model') || '').trim().replace(/^local:/, '');
+}
+
+/** Laptop IP where the security detector runs. Read from router state first,
+ *  then env, then localhost fallback. */
+function getSecurityLaptopIp(): string {
+  return (getRouterState('security:laptop_ip') || process.env.WARDEN_SECURITY_LAPTOP_IP || '127.0.0.1').trim();
+}
+
+/** Pull the current frame from the laptop's security detector and save it to the
+ *  desktop's owner attachments. Returns the [Image: ...] reference string. */
+async function fetchAndSaveSecurityFrame(): Promise<string | null> {
+  const ip = getSecurityLaptopIp();
+  const url = `http://${ip}:8765/frame`;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    const res = await fetch(url, { signal: controller.signal });
+    clearTimeout(timer);
+    if (!res.ok) throw new Error(`frame server returned ${res.status}`);
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (!buf || buf.length === 0) throw new Error('empty frame');
+    const groupDir = path.join(WORKSPACE_ROOT, 'groups', 'owner');
+    const processed = await processImage(buf, groupDir, '');
+    if (!processed) throw new Error('processImage failed');
+    return processed.content; // e.g. "[Image: attachments/xyz.jpg]"
+  } catch (err: any) {
+    logger.warn({ err, url }, 'fetchAndSaveSecurityFrame: failed to pull/save laptop frame');
+    return null;
+  }
+}
+
+/** Spawn Sentry, the background situational-awareness agent (fire-and-forget,
+ *  same shape as the Heimdall background spawn). Never awaited. */
+function spawnSentryBackground(task: string): void {
+  runSubAgentBackground({
+    agent: 'sentry',
+    prompt: task,
+    model: resolveAwarenessModel(),
+    sessionId: 'owner',
+    workspaceRoot: WORKSPACE_ROOT,
+    chatJid: OWNER_JID,
+    groupFolder: 'owner',
+    isMain: true,
+    timeoutMs: 90 * 1000, // greetings are short — don't let a stuck model linger
+    callbacks: buildAgentCallbacks(),
+  } as any);
+}
+
+/**
  * Build the parent-side callback map the agent-runner can invoke when the
  * agent calls one of the side-effecting tools (send_message, schedule_task,
  * read_emails, send_email, install_mcp_server, uninstall_mcp_server,
@@ -321,12 +379,13 @@ export function buildAgentCallbacks(): CallbackMap {
           return { ok: true, skipped: true };
         }
 
+        const senderName = typeof args?.sender === 'string' && args.sender.trim() ? args.sender.trim() : ASSISTANT_NAME;
         const messageId = `bot-cb-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
         storeMessage({
           id: messageId,
           chat_jid: OWNER_JID,
           sender: 'assistant:local',
-          sender_name: ASSISTANT_NAME,
+          sender_name: senderName,
           content: text,
           timestamp: new Date().toISOString(),
           is_from_me: false,
@@ -1051,14 +1110,15 @@ export function buildAgentCallbacks(): CallbackMap {
 
     webcam_capture: async (args: any) => {
       try {
-        // Prefer the Security Mode app's frame server when it's running — the
-        // security app owns /dev/video0 for its cheap detector, so grabbing the
-        // device directly would fail with "device busy". Fall back to ffmpeg.
+        // Prefer the laptop's Security Mode frame server. The detector owns the
+        // webcam, so grabbing /dev/video0 directly would fail. Fall back to ffmpeg.
         let cap;
         let source = 'ffmpeg';
-        if (await securityAppHasFrameServer()) {
+        const laptopIp = getSecurityLaptopIp();
+        const frameUrl = `http://${laptopIp}:8765/frame`;
+        if (await securityAppHasFrameServer(frameUrl)) {
           try {
-            cap = await captureWebcamFromSecurityApp();
+            cap = await captureWebcamFromSecurityApp(frameUrl);
             source = 'security-app';
           } catch (err: any) {
             logger.warn({ err }, 'webcam_capture: security frame server up but fetch failed — falling back to ffmpeg');
@@ -1118,7 +1178,8 @@ export function buildAgentCallbacks(): CallbackMap {
     // it so it can raise the next alert. The detector holds an alert OPEN until
     // this is called (one alert per incident, not one per detection).
     close_security_alert: async (_args: any) => {
-      const url = process.env.WARDEN_SECURITY_CLOSE_URL || 'http://127.0.0.1:8765/alert/close';
+      const ip = getSecurityLaptopIp();
+      const url = `http://${ip}:8765/alert/close`;
       try {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 3000);
@@ -1140,7 +1201,8 @@ export function buildAgentCallbacks(): CallbackMap {
     // Mirrors close_security_alert. The detector keeps running + showing the
     // feed; armed means Heimdall flagging is active, disarmed means it's paused.
     arm_security: async (_args: any) => {
-      const url = process.env.WARDEN_SECURITY_ARM_URL || 'http://127.0.0.1:8765/arm';
+      const ip = getSecurityLaptopIp();
+      const url = `http://${ip}:8765/arm`;
       try {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 3000);
@@ -1160,7 +1222,8 @@ export function buildAgentCallbacks(): CallbackMap {
 
     // Guard's chat command: disarm the standalone detector (stop flagging).
     disarm_security: async (_args: any) => {
-      const url = process.env.WARDEN_SECURITY_DISARM_URL || 'http://127.0.0.1:8765/disarm';
+      const ip = getSecurityLaptopIp();
+      const url = `http://${ip}:8765/disarm`;
       try {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 3000);
@@ -1185,10 +1248,93 @@ export function buildAgentCallbacks(): CallbackMap {
       return securityLog(args);
     },
 
-    // Heimdall declared the flagged detection ABNORMAL → spawn the alert on the
-    // detector (red STAND DOWN button + ALERTED state). Mirrors close_security_alert.
+    // Sentry's situational-awareness log (awareness_log table, same store).
+    // Records each AWARENESS event + Sentry's verdict; Sentry queries it to
+    // de-dup greetings (don't greet twice in a row) and recall recent events.
+    awareness_log: async (args: any) => {
+      return awarenessLog(args);
+    },
+
+    // Orchestrator → Sentry direct (mirrors tell_heimdall). The user tells
+    // Jarvis a fact that should affect greeting behavior ("heading out for
+    // the evening"); Sentry records it in awareness_log as context, silently.
+    tell_sentry: async (args: any) => {
+      try {
+        const message = typeof args?.message === 'string' ? args.message.trim() : '';
+        if (!message) return { ok: false, error: 'missing message' };
+        const tz = process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone;
+        const localNow = new Date().toLocaleString('sv-SE', { timeZone: tz }).replace(' ', 'T');
+        const compactTs = localNow.replace(/[-:]/g, ''); // match the detector's %Y%m%dT%H%M%S
+        const task =
+          `Current local time is ${localNow} (timezone ${tz}).\n\n` +
+          `AWARENESS — note at ${compactTs}. data: {"event":"note","message":${JSON.stringify(message)},"ts":"${compactTs}"}\n\n` +
+          `The user passed you a note for your awareness context (see the data message above). ` +
+          `Record it with awareness_log (action record, event "note", assessment "note") so it factors into future greetings. ` +
+          `Do NOT send_message and do NOT reply in chat — record it silently and stop.`;
+        spawnSentryBackground(task);
+        logger.info('tell_sentry: spawned Sentry to record message');
+        return { ok: true };
+      } catch (err: any) {
+        logger.warn({ err }, 'tell_sentry: failed to spawn Sentry');
+        return { ok: false, error: String(err?.message ?? err) };
+      }
+    },
+
+    // Sentry detected an anomaly from structured data → escalate to Heimdall.
+    // Heimdall pulls a live frame from the laptop, confirms/denies the anomaly,
+    // and alerts the user if confirmed.
+    escalate_to_heimdall: async (args: any) => {
+      try {
+        const reason = String(args?.reason || '').trim();
+        // Retrieve the AWARENESS event that triggered this escalation.
+        const awarenessText = lastAwarenessEvent || '';
+        if (!awarenessText) {
+          logger.warn('escalate_to_heimdall: no recent AWARENESS event stored');
+          return { ok: false, error: 'no awareness event context' };
+        }
+
+        // Pull a fresh frame from the laptop and save it to desktop attachments.
+        const imageTag = await fetchAndSaveSecurityFrame();
+        if (!imageTag) {
+          return { ok: false, error: 'could not fetch frame from security laptop' };
+        }
+
+        const tz = process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone;
+        const localNow = new Date().toLocaleString('sv-SE', { timeZone: tz }).replace(' ', 'T');
+        const task =
+          `Current local time is ${localNow} (timezone ${tz}).\n\n` +
+          `${awarenessText}\n\n` +
+          `Sentry flagged this as anomalous: ${reason || '(no reason given)'}\n\n` +
+          `Heimdall, confirm or deny the anomaly using the live frame attached below and the data above. ` +
+          `If you CONFIRM a real problem, send_message the user with a concise alert and include the image tag exactly as shown: ${imageTag}. ` +
+          `Then call open_security_alert to light the red alert on the laptop. ` +
+          `If you DENY (false positive), record security_log as normal and stop silently.`;
+
+        const heimdallModel = (getRouterState('heimdall:model') || '').replace(/^local:/, '') || undefined;
+        runSubAgentBackground({
+          agent: 'heimdall',
+          prompt: task,
+          model: heimdallModel,
+          sessionId: 'owner',
+          workspaceRoot: WORKSPACE_ROOT,
+          chatJid: OWNER_JID,
+          groupFolder: 'owner',
+          isMain: true,
+          timeoutMs: 5 * 60 * 1000,
+          callbacks: buildAgentCallbacks(),
+        } as any);
+        logger.info({ reason, imageTag }, 'escalate_to_heimdall: spawned Heimdall for vision confirmation');
+        return { ok: true };
+      } catch (err: any) {
+        logger.warn({ err }, 'escalate_to_heimdall: failed to spawn Heimdall');
+        return { ok: false, error: String(err?.message ?? err) };
+      }
+    },
+
+    // Heimdall confirmed an anomaly → light the red alert on the laptop detector.
     open_security_alert: async (_args: any) => {
-      const url = process.env.WARDEN_SECURITY_OPEN_URL || 'http://127.0.0.1:8765/alert/open';
+      const ip = getSecurityLaptopIp();
+      const url = `http://${ip}:8765/alert/open`;
       try {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 3000);
@@ -1376,62 +1522,54 @@ async function processOwnerMessages(): Promise<void> {
     return;
   }
 
-  // ── Security alerts → Heimdall direct pipe ────────────────────────────────
-  // A SECURITY ALERT message (posted by the standalone detector app, carrying
-  // an [Image: <frame>.jpg] reference) is piped straight to Heimdall — the
-  // background security agent — in code. The orchestrator is NOT involved: no
-  // echo, no double-send, no orchestrator turn. Heimdall gets the alert text as
-  // its task (the [Image: ...] path tells it which frame to Read), runs on its
-  // own dashboard model (heimdall:model), decides normal vs abnormal, and
-  // arms/disarms/triggers/clears the alert itself. The alert message is already
-  // stored (it shows once in the dashboard chat); we just route it to Heimdall
-  // instead of the orchestrator and return.
-  const isSecurityAlert = pending.some((m) => (m.content || '').startsWith('SECURITY ALERT'));
-  if (isSecurityAlert) {
+  // ── Awareness events → Sentry direct pipe ───────────────────────────────
+  // An AWARENESS message (posted by the standalone detector's presence
+  // tracker — arrival/departure/note, event-driven, never per-frame) is piped
+  // straight to Sentry, the background situational-awareness agent, in code.
+  // Same engrained pattern: the event row is pre-written to awareness_log
+  // (so it's recorded even if Sentry crashes), Sentry runs on the model
+  // configured in dashboard (sentry:model), and we return so the orchestrator
+  // never burns a turn on it.
+  // Independent of the arm/disarm state — awareness ≠ security arming.
+  const isAwareness = pending.some((m) => (m.content || '').startsWith('AWARENESS'));
+  if (isAwareness) {
     lastAgentTimestamp = pending[pending.length - 1]!.timestamp;
     saveState();
-    logger.info({ chatJid: OWNER_JID, messageCount: pending.length }, 'Security alert → piping to Heimdall (background)');
+    logger.info({ chatJid: OWNER_JID, messageCount: pending.length }, 'Security awareness → routing to Sentry (background)');
 
     const tz = process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone;
     const localNow = new Date().toLocaleString('sv-SE', { timeZone: tz }).replace(' ', 'T');
-    const secAlerts = pending.filter((m) => (m.content || '').startsWith('SECURITY ALERT'));
-    const latest = secAlerts.length > 0 ? secAlerts[secAlerts.length - 1] : pending[pending.length - 1]!;
-    const alertText = latest.content || '';
-    const task = `Current local time is ${localNow} (timezone ${tz}).\n\n${alertText}`;
+    const events = pending.filter((m) => (m.content || '').startsWith('AWARENESS'));
+    const latest = events.length > 0 ? events[events.length - 1] : pending[pending.length - 1]!;
+    const awarenessText = latest.content || '';
+    lastAwarenessEvent = awarenessText;
+    const task = `Current local time is ${localNow} (timezone ${tz}).\n\n${awarenessText}`;
 
-    // Log the flag to security_log the moment it's routed, so a flag is always
-    // recorded even if Heimdall crashes before writing its own assessment.
+    // Pre-write the event row (engrained logging — survives a Sentry crash).
+    // Parse "AWARENESS — <event> at <ts>. data: <json>"; parse failures just
+    // record the raw text in the data column.
     try {
-      const m = /SECURITY ALERT — (.+?) at (\S+)\./.exec(alertText);
-      securityLog({
+      const m = /AWARENESS — (\S+) at (\S+)\. data: (.+)$/s.exec(awarenessText);
+      let data: any = {};
+      try { data = m?.[3] ? JSON.parse(m[3]) : {}; } catch { data = { raw: (m?.[3] || '').slice(0, 500) }; }
+      awarenessLog({
         action: 'record',
-        alert_ts: m?.[2] || localNow,
-        camera: 'webcam0',
-        assessment: 'flagged',
-        condition: m?.[1] || 'security flag',
-        escalated: false,
-        data: { flag: alertText.slice(0, 500) },
+        ts: m?.[2] || localNow,
+        event: m?.[1] || 'event',
+        label: typeof data.label === 'string' ? data.label : null,
+        is_known: typeof data.is_known === 'boolean' ? data.is_known : null,
+        seconds_empty: typeof data.seconds_empty === 'number' ? data.seconds_empty : null,
+        assessment: 'flagged', // event received; Sentry's own row carries its verdict
+        data,
       });
     } catch { /* best-effort */ }
 
-    const heimdallModel = (getRouterState('heimdall:model') || '').replace(/^local:/, '') || undefined;
     try {
-      runSubAgentBackground({
-        agent: 'heimdall',
-        prompt: task,
-        model: heimdallModel,
-        sessionId: 'owner',
-        workspaceRoot: WORKSPACE_ROOT,
-        chatJid: OWNER_JID,
-        groupFolder: 'owner',
-        isMain: true,
-        timeoutMs: 5 * 60 * 1000,
-        callbacks: buildAgentCallbacks(),
-      } as any);
+      spawnSentryBackground(task);
     } catch (err: any) {
-      logger.warn({ err }, 'Security alert: failed to spawn Heimdall');
+      logger.warn({ err }, 'Awareness: failed to spawn Sentry');
     }
-    return; // do NOT run the orchestrator for security alerts
+    return; // do NOT run the orchestrator for awareness events
   }
 
   const prompt = buildPrompt(pending);

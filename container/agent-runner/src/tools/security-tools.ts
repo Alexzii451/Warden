@@ -9,6 +9,41 @@ async function callHost(tool: string, args: any, timeoutMs = 10000): Promise<any
     }
 }
 
+/** Push a base64 image into the vision-context queue consumed after this tool call. */
+function queueForVision(b64: string): void {
+    if (!b64) return;
+    if (!(globalThis as any)._pendingImages) (globalThis as any)._pendingImages = [];
+    (globalThis as any)._pendingImages.push(b64);
+}
+
+// Poll the running security detector (security/main.py) for its current frame.
+// The detector owns the webcam, so this fetches the live frame from its HTTP
+// frame server (http://127.0.0.1:8765/frame) via the host's webcam_capture
+// callback — it does NOT open /dev/video0 (which is held by the detector).
+registry.register({
+    name: 'security_frame',
+    description:
+        "Poll the running security detector for its current camera frame and load it into your " +
+        "vision context. The detector owns the webcam, so this fetches the live frame from the " +
+        "security app's frame server — not /dev/video0. Use this (not webcam_capture) when the " +
+        "security program is running and you need to see the frame. Returns the resolution.",
+    schema: { type: 'object', properties: {}, required: [] },
+    handler: async (_args) => {
+        try {
+            const res = await writeCallbackAsync('webcam_capture', {}, 20000);
+            if (!res || res.ok === false) return `Error polling security frame: ${res?.error || 'host callback failed'}`;
+            const b64 = typeof res.image === 'string' ? res.image : '';
+            if (!b64) return `Error: host returned no frame${res?.error ? ` (${res.error})` : ''} — is the security detector running?`;
+            queueForVision(b64);
+            return `Security frame captured (${res.width}×${res.height}px). The image is now in your vision context — describe what you see.`;
+        } catch (err: any) {
+            return `Error polling security frame: ${err.message}`;
+        }
+    },
+    toolset: 'security',
+    tier: 'public',
+});
+
 // Security Mode tools (Heimdall, the background security agent). The standalone
 // detector app holds an alert OPEN until Warden closes it; close_security_alert
 // (via dismiss_security_flag) re-arms it. alert_security is the MOCK

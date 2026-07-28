@@ -23,6 +23,7 @@ import {
   TIMEZONE,
   CLOUD_MODELS,
   isCustomApiAllowed,
+  WORKSPACE_ROOT,
 } from './config.js';
 import { ollamaIsAvailable } from './ollama-client.js';
 import { ollamaModelSupportsThinking } from './ollama-native.js';
@@ -783,7 +784,10 @@ async function handleMessages(
     const since = params.get('since') || '';
     const limit = parseInt(params.get('limit') || '50', 10);
     const idea = params.get('idea') || '';
-    const messages = deps.getMessagesForDashboard(jid, since, limit, idea || undefined);
+    const messages = deps.getMessagesForDashboard(jid, since, limit, idea || undefined)
+      // Hide raw AWARENESS triggers from the chat — they're internal events for
+      // Sentry, not user-facing. Sentry's own send_message reply still shows.
+      .filter((m: any) => !(m.content || '').startsWith('AWARENESS'));
     return json(res, { messages, jid });
   }
 
@@ -1320,6 +1324,11 @@ function handleSettings(res: http.ServerResponse): void {
   const googleSecret = process.env.GOOGLE_CLIENT_SECRET || envVals.GOOGLE_CLIENT_SECRET || '';
   const msId = process.env.MICROSOFT_CLIENT_ID || envVals.MICROSOFT_CLIENT_ID || '';
   const msSecret = process.env.MICROSOFT_CLIENT_SECRET || envVals.MICROSOFT_CLIENT_SECRET || '';
+  let sentryMd = '';
+  try {
+    const sentryMdPath = path.resolve(WORKSPACE_ROOT, 'security', 'sentry.md');
+    if (fs.existsSync(sentryMdPath)) sentryMd = fs.readFileSync(sentryMdPath, 'utf8');
+  } catch { /* ignore */ }
   json(res, {
     assistantName: ASSISTANT_NAME,
     localAssistantName: LOCAL_ASSISTANT_NAME,
@@ -1339,6 +1348,9 @@ function handleSettings(res: http.ServerResponse): void {
     councilPragmatistModel: getRouterState('council:pragmatist_model') || '',
     councilSynthesistModel: getRouterState('council:synthesist_model') || '',
     heimdallModel: getRouterState('heimdall:model') || '',
+    sentryModel: getRouterState('sentry:model') || '',
+    securityLaptopIp: getRouterState('security:laptop_ip') || process.env.WARDEN_SECURITY_LAPTOP_IP || '',
+    sentryMd,
     ollamaEnabled: getRouterState('ollama_enabled') === 'true',
     automationModel: getRouterState('automation:model') || '',
     hybridPrivacy: getRouterState('hybrid_privacy') || '',
@@ -1412,6 +1424,17 @@ async function handleSettingsSave(
   // model if the cloud orchestrator model 500s on Ollama's images field.
   if (body.heimdallModel !== undefined) {
     setRouterState('heimdall:model', String(body.heimdallModel || ''));
+  }
+  // Sentry (background awareness agent) model — light local model that checks
+  // structured camera data. Blank inherits the orchestrator model.
+  if (body.sentryModel !== undefined) {
+    setRouterState('sentry:model', String(body.sentryModel || ''));
+  }
+  // IP of the laptop running the security detector (camera + structured data feed).
+  if (body.securityLaptopIp !== undefined) {
+    const ip = String(body.securityLaptopIp || '').trim();
+    setRouterState('security:laptop_ip', ip);
+    if (ip) process.env.WARDEN_SECURITY_LAPTOP_IP = ip;
   }
   // Mirror toolcall model into router_state and live env so subprocess inherits it.
   if (body.ollamaChatModel !== undefined) {
@@ -3438,6 +3461,24 @@ export function startStatusServer(d: StatusDeps): void {
         return handleSettings(res);
       if (pathname === '/api/settings' && req.method === 'POST')
         return await handleSettingsSave(req, res);
+      if (pathname === '/api/security/sentry-md') {
+        const sentryMdPath = path.resolve(WORKSPACE_ROOT, 'security', 'sentry.md');
+        try {
+          if (req.method === 'GET') {
+            const content = fs.existsSync(sentryMdPath) ? fs.readFileSync(sentryMdPath, 'utf8') : '';
+            return json(res, { ok: true, content });
+          }
+          if (req.method === 'POST') {
+            const body = parseJson(await parseBody(req)) as any;
+            const content = typeof body?.content === 'string' ? body.content : '';
+            fs.mkdirSync(path.dirname(sentryMdPath), { recursive: true });
+            fs.writeFileSync(sentryMdPath, content, 'utf8');
+            return json(res, { ok: true });
+          }
+        } catch (err: any) {
+          return json(res, { ok: false, error: String(err?.message ?? err) });
+        }
+      }
       if (pathname === '/api/audit/run' && req.method === 'POST') {
         try {
           const script = path.resolve(process.cwd(), 'tests/audit-agent-behavior.sh');
