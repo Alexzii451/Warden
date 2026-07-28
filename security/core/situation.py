@@ -134,6 +134,7 @@ class SituationTracker:
         self._state_since = time.time()
         self._present_streak = 0
         self._absent_streak = 0
+        self._last_announced_count = 0
 
         # Camera-motion state.
         self._prev_phashes: deque = deque(maxlen=camera_moved_history)
@@ -208,46 +209,38 @@ class SituationTracker:
             self._camera_moved_recent = now
             self.reset()
 
-        # Person arrivals: a new ID means someone new came into view. Report it
-        # even if the room was already occupied — "one person, now two" is a change.
-        for pid in new_persons:
-            events.append(ChangeEvent(
-                "arrival",
-                subject_id=pid,
-                data={"ts": ts, "person_count": len(persons_out)},
-            ))
-
-        # Room became occupied (0 -> >=1). Report this as a single "arrival"
-        # event summarising the new occupancy, unless we already emitted individual
-        # arrivals above.
-        if room_occupied and not self._room_occupied:
-            if not new_persons:
+        # Person-count transitions are the real awareness events. We don't care
+        # about individual IDs — we care whether the number of people changed.
+        # Record the transition and emit arrival/departure based on occupancy.
+        prev_count = self._last_announced_count
+        current_count = len(persons_out)
+        if current_count != prev_count and room_occupied == self._room_occupied:
+            # Count changed while occupancy state was stable (e.g. 1 -> 2 people).
+            if current_count > prev_count:
                 events.append(ChangeEvent(
                     "arrival",
-                    data={"ts": ts, "person_count": len(persons_out), "summary": "room became occupied"},
+                    data={"ts": ts, "person_count": current_count, "previous_count": prev_count},
                 ))
-
-        # Person departures: an ID is gone. Only report when the ID actually
-        # leaves the track set, not while it's briefly missing.
-        departed_ids = [
-            pid for pid, p in self._tracked.items()
-            if p.frames_missing == self.presence_debounce and pid not in matched_ids
-        ]
-        for pid in departed_ids:
-            events.append(ChangeEvent(
-                "departure",
-                subject_id=pid,
-                data={"ts": ts, "seconds_occupied": round(seconds_in_state, 1)},
-            ))
-
-        # Room became empty (>=1 -> 0). Report as a single "departure" event
-        # summarising the transition.
-        if not room_occupied and self._room_occupied:
-            if not departed_ids:
+            elif current_count < prev_count:
                 events.append(ChangeEvent(
                     "departure",
-                    data={"ts": ts, "seconds_occupied": round(seconds_in_state, 1), "summary": "room became empty"},
+                    data={"ts": ts, "person_count": current_count, "previous_count": prev_count},
                 ))
+            self._last_announced_count = current_count
+
+        # Room occupancy transitions: empty -> occupied or occupied -> empty.
+        if room_occupied and not self._room_occupied:
+            events.append(ChangeEvent(
+                "arrival",
+                data={"ts": ts, "person_count": current_count, "summary": "room became occupied"},
+            ))
+            self._last_announced_count = current_count
+        if not room_occupied and self._room_occupied:
+            events.append(ChangeEvent(
+                "departure",
+                data={"ts": ts, "person_count": current_count, "summary": "room became empty"},
+            ))
+            self._last_announced_count = current_count
 
         self._room_occupied = room_occupied
 
