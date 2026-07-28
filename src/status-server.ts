@@ -9,6 +9,7 @@ import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
 import { transcribeLocal } from './transcription.js';
 import { killCurrentAgent, getLiveStatus, getProgressHistory } from './agent-spawn.js';
+import { spawnSentryBackground } from './index.js';
 import {
   ASSISTANT_NAME,
   CONTAINER_IMAGE,
@@ -63,6 +64,9 @@ import {
   removeMcpServer,
   setMcpServerEnabled,
 } from './mcp-registry.js';
+import {
+  awarenessLog,
+} from './security-log.js';
 import {
   createTask,
   createUserTask,
@@ -3478,6 +3482,41 @@ export function startStatusServer(d: StatusDeps): void {
       }
       if (pathname === '/api/messages')
         return await handleMessages(req, res, params);
+      if (pathname === '/api/awareness' && req.method === 'POST') {
+        try {
+          const body = parseJson(await parseBody(req)) as { text?: string };
+          const text = String(body?.text || '');
+          if (!text.startsWith('AWARENESS')) {
+            return error(res, 'expected AWARENESS message');
+          }
+
+          // Parse "AWARENESS — <event> at <ts>. data: <json>" for engrained logging.
+          const m = /AWARENESS — (\S+) at (\S+)\. data: (.+)$/s.exec(text);
+          let data: any = {};
+          try { data = m?.[3] ? JSON.parse(m[3]) : {}; } catch { data = { raw: (m?.[3] || '').slice(0, 500) }; }
+          awarenessLog({
+            action: 'record',
+            ts: m?.[2] || new Date().toISOString(),
+            event: m?.[1] || 'event',
+            label: typeof data.label === 'string' ? data.label : null,
+            is_known: typeof data.is_known === 'boolean' ? data.is_known : null,
+            seconds_empty: typeof data.seconds_empty === 'number' ? data.seconds_empty : null,
+            assessment: 'flagged',
+            data,
+          });
+
+          // Spawn Sentry directly; no chat message, no channel relay.
+          const tz = process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone;
+          const localNow = new Date().toLocaleString('sv-SE', { timeZone: tz }).replace(' ', 'T');
+          const task = `Current local time is ${localNow} (timezone ${tz}).\n\n${text}`;
+          spawnSentryBackground(task);
+
+          logger.info({ text: text.slice(0, 80) }, 'AWARENESS routed directly to Sentry');
+          return json(res, { ok: true });
+        } catch (err: any) {
+          return json(res, { ok: false, error: String(err?.message ?? err) });
+        }
+      }
       if (pathname.startsWith('/api/files'))
         return await handleFiles(req, res, pathname, params);
       if (pathname === '/api/settings' && req.method === 'GET')

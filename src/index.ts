@@ -340,7 +340,7 @@ async function fetchAndSaveSecurityFrame(): Promise<string | null> {
 
 /** Spawn Sentry, the background situational-awareness agent (fire-and-forget,
  *  same shape as the Heimdall background spawn). Never awaited. */
-function spawnSentryBackground(task: string): void {
+export function spawnSentryBackground(task: string): void {
   runSubAgentBackground({
     agent: 'sentry',
     prompt: task,
